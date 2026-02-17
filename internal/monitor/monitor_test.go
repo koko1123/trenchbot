@@ -32,7 +32,7 @@ func TestEvaluateExit_StopLoss(t *testing.T) {
 
 	store.AddPosition(&state.Position{
 		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
-		EntryPrice: 1.0, CurrentPrice: 0.49, PeakPrice: 1.0, EntryTime: clk.Now(),
+		EntryPrice: 1.0, CurrentPrice: 0.49, PeakPrice: 1.0, Amount: 0.3, EntryTime: clk.Now(),
 	})
 
 	mon.CheckPositions(context.Background())
@@ -52,7 +52,7 @@ func TestEvaluateExit_Tranche1(t *testing.T) {
 
 	store.AddPosition(&state.Position{
 		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
-		EntryPrice: 1.0, CurrentPrice: 2.0, PeakPrice: 2.0, SoldPct: 0, EntryTime: clk.Now(),
+		EntryPrice: 1.0, CurrentPrice: 2.0, PeakPrice: 2.0, SoldPct: 0, Amount: 0.3, EntryTime: clk.Now(),
 	})
 
 	mon.CheckPositions(context.Background())
@@ -72,7 +72,7 @@ func TestEvaluateExit_Tranche2(t *testing.T) {
 
 	store.AddPosition(&state.Position{
 		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
-		EntryPrice: 1.0, CurrentPrice: 5.0, PeakPrice: 5.0, SoldPct: 25, EntryTime: clk.Now(),
+		EntryPrice: 1.0, CurrentPrice: 5.0, PeakPrice: 5.0, SoldPct: 25, Amount: 0.3, EntryTime: clk.Now(),
 	})
 
 	mon.CheckPositions(context.Background())
@@ -93,7 +93,7 @@ func TestEvaluateExit_TrailingStop(t *testing.T) {
 	// Peak was 10x, now dropped 40% from peak to 6x. Tranches 1+2 already done (75%).
 	store.AddPosition(&state.Position{
 		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
-		EntryPrice: 1.0, CurrentPrice: 6.0, PeakPrice: 10.0, SoldPct: 75, EntryTime: clk.Now(),
+		EntryPrice: 1.0, CurrentPrice: 6.0, PeakPrice: 10.0, SoldPct: 75, Amount: 0.3, EntryTime: clk.Now(),
 	})
 
 	mon.CheckPositions(context.Background())
@@ -114,7 +114,7 @@ func TestEvaluateExit_TrailingNotBeforeTranches(t *testing.T) {
 	// Price dropped 40% from peak but tranches not completed yet (SoldPct=25)
 	store.AddPosition(&state.Position{
 		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
-		EntryPrice: 1.0, CurrentPrice: 6.0, PeakPrice: 10.0, SoldPct: 25, EntryTime: clk.Now(),
+		EntryPrice: 1.0, CurrentPrice: 6.0, PeakPrice: 10.0, SoldPct: 25, Amount: 0.3, EntryTime: clk.Now(),
 	})
 
 	mon.CheckPositions(context.Background())
@@ -136,7 +136,7 @@ func TestEvaluateExit_StalePosition(t *testing.T) {
 
 	store.AddPosition(&state.Position{
 		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
-		EntryPrice: 1.0, CurrentPrice: 1.3, PeakPrice: 1.3, SoldPct: 0, EntryTime: start,
+		EntryPrice: 1.0, CurrentPrice: 1.3, PeakPrice: 1.3, SoldPct: 0, Amount: 0.3, EntryTime: start,
 	})
 
 	// Advance 31 minutes
@@ -159,7 +159,7 @@ func TestEvaluateExit_StaleNotIfProfitable(t *testing.T) {
 
 	store.AddPosition(&state.Position{
 		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
-		EntryPrice: 1.0, CurrentPrice: 1.6, PeakPrice: 1.6, SoldPct: 0, EntryTime: start,
+		EntryPrice: 1.0, CurrentPrice: 1.6, PeakPrice: 1.6, SoldPct: 0, Amount: 0.3, EntryTime: start,
 	})
 
 	clk.Advance(31 * time.Minute)
@@ -178,7 +178,7 @@ func TestEvaluateExit_PriorityOrder(t *testing.T) {
 	// Price at 0.4x — should stop-loss (not stale or anything else)
 	store.AddPosition(&state.Position{
 		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
-		EntryPrice: 1.0, CurrentPrice: 0.4, PeakPrice: 1.0, SoldPct: 0,
+		EntryPrice: 1.0, CurrentPrice: 0.4, PeakPrice: 1.0, SoldPct: 0, Amount: 0.3,
 		EntryTime: clk.Now().Add(-31 * time.Minute),
 	})
 
