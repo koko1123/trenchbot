@@ -1,0 +1,46 @@
+package executor
+
+import (
+	"context"
+
+	"github.com/cindocode/trenchbot/internal/state"
+)
+
+type BuyParams struct {
+	Chain        state.Chain
+	TokenAddress string
+	TokenSymbol  string
+	Amount       float64 // native token amount (SOL or BNB)
+	Shadow       bool
+}
+
+type SellParams struct {
+	Chain        state.Chain
+	TokenAddress string
+	TokenSymbol  string
+	AmountPct    float64 // percentage of position to sell (0-100)
+	Shadow       bool
+}
+
+type BuyResult struct {
+	Success  bool
+	TxHash   string
+	Price    float64
+	Amount   float64
+	Error    error
+}
+
+type SellResult struct {
+	Success  bool
+	TxHash   string
+	Price    float64
+	Amount   float64
+	PnLPct   float64
+	Error    error
+}
+
+type Executor interface {
+	Buy(ctx context.Context, params BuyParams) BuyResult
+	Sell(ctx context.Context, params SellParams) SellResult
+	Chain() state.Chain
+}

@@ -1,0 +1,78 @@
+{
+  "seed": 42,
+  "simulated_duration": 21600000000000,
+  "wall_clock_elapsed": 609054958,
+  "tokens_generated": 360,
+  "tokens_filtered": 240,
+  "tokens_blocked": 183,
+  "tokens_bought": 57,
+  "exits_by_reason": {
+    "end-of-sim": 2,
+    "stale-position": 28,
+    "stop-loss": 25,
+    "trailing-stop": 2,
+    "tranche-1": 14,
+    "tranche-2": 2
+  },
+  "total_pnl_pct": 2100.393460562086,
+  "win_count": 27,
+  "loss_count": 46,
+  "win_rate": 0.3698630136986301,
+  "best_trade": 728.824896398762,
+  "worst_trade": -68.54371679745921,
+  "average_pnl": 28.77251315838474,
+  "max_drawdown_pct": 0.3942630360782261,
+  "circuit_breaker_halts": 0,
+  "circuit_breaker_pauses": 13,
+  "market_shocks": 7,
+  "archetype_results": {
+    "delayed-rug": {
+      "generated": 9,
+      "bought": 3,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "moderate": {
+      "generated": 36,
+      "bought": 8,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "moonshot": {
+      "generated": 12,
+      "bought": 2,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "naked-rug": {
+      "generated": 120,
+      "bought": 0,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "polished-rug": {
+      "generated": 77,
+      "bought": 20,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "scam": {
+      "generated": 22,
+      "bought": 2,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "slow": {
+      "generated": 33,
+      "bought": 6,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "slow-bleed": {
+      "generated": 51,
+      "bought": 16,
+      "avg_pnl": 0,
+      "win_rate": 0
+    }
+  }
+}
