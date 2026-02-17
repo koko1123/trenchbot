@@ -16,6 +16,9 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+// bnbEstimatedGasCost is the estimated gas per transaction on BSC (~21000 gas * 3 gwei).
+const bnbEstimatedGasCost = 0.0003 // BNB
+
 const fourMemeABI = `[{"inputs":[{"name":"origin","type":"address"},{"name":"token","type":"address"},{"name":"funds","type":"uint256"},{"name":"minAmount","type":"uint256"}],"name":"buyTokenAMAP","outputs":[],"stateMutability":"payable","type":"function"}]`
 
 type FourMemeExecutor struct {
@@ -54,6 +57,7 @@ func (e *FourMemeExecutor) Buy(ctx context.Context, params BuyParams) BuyResult 
 			Success: true,
 			TxHash:  "shadow-" + params.TokenAddress[:8],
 			Amount:  params.Amount,
+			GasCost: bnbEstimatedGasCost,
 		}
 	}
 
@@ -106,10 +110,15 @@ func (e *FourMemeExecutor) Buy(ctx context.Context, params BuyParams) BuyResult 
 		"amount_bnb", params.Amount,
 	)
 
+	// Estimate gas cost: gasLimit * gasPrice in BNB.
+	gasCostWei := new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), gasPrice)
+	gasCostBNB, _ := new(big.Float).Quo(new(big.Float).SetInt(gasCostWei), big.NewFloat(1e18)).Float64()
+
 	return BuyResult{
 		Success: true,
 		TxHash:  txHash,
 		Amount:  params.Amount,
+		GasCost: gasCostBNB,
 	}
 }
 
@@ -124,6 +133,7 @@ func (e *FourMemeExecutor) Sell(ctx context.Context, params SellParams) SellResu
 		return SellResult{
 			Success: true,
 			TxHash:  "shadow-sell-" + params.TokenAddress[:8],
+			GasCost: bnbEstimatedGasCost,
 		}
 	}
 

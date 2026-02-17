@@ -49,9 +49,14 @@ func main() {
 		cancel()
 	}()
 
+	if err := notify.Init(cfg.SentryDSN, cfg.Mode); err != nil {
+		log.Warn("sentry init failed, events will not be tracked", "err", err)
+	}
+	defer notify.Flush(2 * time.Second)
+
 	clk := clock.RealClock{}
 	store := state.NewStore()
-	notifier := notify.New(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.DiscordWebhookURL, log)
+	notifier := notify.New(cfg.SentryDSN, log)
 
 	solClient, err := solanaclient.NewClient(cfg.SolanaRPCURL, cfg.SolanaPrivateKey, log)
 	if err != nil {
@@ -86,7 +91,12 @@ func main() {
 		}, store, clk, log)
 	}
 
+	// Initialize gas balances.
+	store.SetGasBalance(state.ChainSolana, cfg.GasBudgetSOL)
+	store.SetGasBalance(state.ChainBNB, cfg.GasBudgetBNB)
+
 	sizer := risk.NewPositionSizer(store, cfg.SolanaSnipeAmount, cfg.BNBSnipeAmount, cfg.DailyLossLimitPct)
+	sizer.SetGasReserves(cfg.MinGasReserveSOL, cfg.MinGasReserveBNB)
 	tokenFilter := filter.New(cfg.MinScoreThreshold, log)
 
 	executors := make(map[state.Chain]executor.Executor)
@@ -250,6 +260,9 @@ func processToken(
 
 	cb.RecordSnipe()
 
+	// Deduct buy gas.
+	store.DeductGas(token.Chain, buyResult.GasCost)
+
 	posID := fmt.Sprintf("%s-%s-%d", token.Chain, token.Address[:8], time.Now().UnixMilli())
 	store.AddPosition(&state.Position{
 		ID:           posID,
@@ -261,6 +274,7 @@ func processToken(
 		PeakPrice:    buyResult.Price,
 		Amount:       buyResult.Amount,
 		EntryTime:    time.Now(),
+		EntryGasCost: buyResult.GasCost,
 	})
 
 	store.AddTrade(state.Trade{

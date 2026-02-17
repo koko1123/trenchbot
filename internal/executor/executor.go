@@ -27,6 +27,7 @@ type BuyResult struct {
 	TxHash   string
 	Price    float64
 	Amount   float64
+	GasCost  float64 // gas paid in native token (SOL or BNB)
 	Error    error
 }
 
@@ -36,6 +37,7 @@ type SellResult struct {
 	Price    float64
 	Amount   float64
 	PnLPct   float64
+	GasCost  float64 // gas paid in native token (SOL or BNB)
 	Error    error
 }
 

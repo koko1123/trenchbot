@@ -12,6 +12,8 @@ type BacktestConfig struct {
 	EndDate        string  `envconfig:"BACKTEST_END_DATE" required:"true"`
 	StartingEquity float64 `envconfig:"BACKTEST_EQUITY" default:"1200"`
 	MinScore       int     `envconfig:"BACKTEST_MIN_SCORE" default:"60"`
+	GasBudget      float64 `envconfig:"BACKTEST_GAS_BUDGET_SOL" default:"0.25"`
+	GasCostPerTx   float64 `envconfig:"BACKTEST_GAS_COST_PER_TX" default:"0.000505"`
 }
 
 func LoadBacktestConfig() (BacktestConfig, error) {

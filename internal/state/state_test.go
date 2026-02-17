@@ -101,6 +101,30 @@ func TestStore_RecentTrades(t *testing.T) {
 	}
 }
 
+func TestStore_GasBalance(t *testing.T) {
+	s := NewStore()
+	s.SetGasBalance(ChainSolana, 0.25)
+
+	if got := s.GetGasBalance(ChainSolana); got != 0.25 {
+		t.Errorf("gas balance = %f, want 0.25", got)
+	}
+
+	s.DeductGas(ChainSolana, 0.000505)
+	if got := s.GetGasBalance(ChainSolana); got < 0.249 || got > 0.2496 {
+		t.Errorf("gas balance after deduct = %f, want ~0.2495", got)
+	}
+
+	if got := s.GetGasSpent(ChainSolana); got < 0.0005 || got > 0.00051 {
+		t.Errorf("gas spent = %f, want ~0.000505", got)
+	}
+
+	// Deduct more than balance — should floor at 0.
+	s.DeductGas(ChainSolana, 1.0)
+	if got := s.GetGasBalance(ChainSolana); got != 0 {
+		t.Errorf("gas balance should be 0 after overdraw, got %f", got)
+	}
+}
+
 func TestStore_ConcurrentAccess(t *testing.T) {
 	s := NewStore()
 	var wg sync.WaitGroup

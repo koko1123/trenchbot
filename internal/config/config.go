@@ -38,13 +38,19 @@ type Config struct {
 	TotalDrawdownLimitPct      float64 `envconfig:"TOTAL_DRAWDOWN_LIMIT_PCT" default:"40"`
 	ConsecutiveLossPauseThresh int     `envconfig:"CONSECUTIVE_LOSS_PAUSE_THRESHOLD" default:"10"`
 
+	// Gas
+	GasBudgetSOL     float64 `envconfig:"GAS_BUDGET_SOL" default:"0.25"`
+	GasBudgetBNB     float64 `envconfig:"GAS_BUDGET_BNB" default:"0.08"`
+	GasCostPerTxSOL  float64 `envconfig:"GAS_COST_PER_TX_SOL" default:"0.000505"`
+	GasCostPerTxBNB  float64 `envconfig:"GAS_COST_PER_TX_BNB" default:"0.0003"`
+	MinGasReserveSOL float64 `envconfig:"MIN_GAS_RESERVE_SOL" default:"0.005"`
+	MinGasReserveBNB float64 `envconfig:"MIN_GAS_RESERVE_BNB" default:"0.002"`
+
 	// Filter
 	MinScoreThreshold int `envconfig:"MIN_SCORE_THRESHOLD" default:"60"`
 
-	// Notifications
-	TelegramBotToken  string `envconfig:"TELEGRAM_BOT_TOKEN"`
-	TelegramChatID    string `envconfig:"TELEGRAM_CHAT_ID"`
-	DiscordWebhookURL string `envconfig:"DISCORD_WEBHOOK_URL"`
+	// Observability
+	SentryDSN string `envconfig:"SENTRY_DSN"`
 }
 
 func Load() (*Config, error) {

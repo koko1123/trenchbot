@@ -38,6 +38,7 @@ func (m *MockExecutor) Buy(ctx context.Context, params executor.BuyParams) execu
 		TxHash:  "mock-buy-" + params.TokenAddress,
 		Price:   1.0,
 		Amount:  params.Amount,
+		GasCost: 0.000505,
 	}
 }
 
@@ -54,6 +55,7 @@ func (m *MockExecutor) Sell(ctx context.Context, params executor.SellParams) exe
 		TxHash:  "mock-sell-" + params.TokenAddress,
 		Price:   1.0,
 		Amount:  params.AmountPct,
+		GasCost: 0.000505,
 	}
 }
 

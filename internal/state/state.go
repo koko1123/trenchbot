@@ -25,6 +25,8 @@ type Position struct {
 	SoldPct       float64 // percentage already sold (0-100)
 	Closed        bool
 	PnL           float64
+	EntryGasCost  float64 // gas paid on buy tx (native token)
+	ExitGasCost   float64 // cumulative gas paid on sell tx(s)
 }
 
 type Trade struct {
@@ -38,6 +40,7 @@ type Trade struct {
 	Timestamp    time.Time
 	TxHash       string
 	Shadow       bool
+	GasCost      float64 // gas cost in native token
 }
 
 type Store struct {
@@ -46,6 +49,8 @@ type Store struct {
 	trades     []Trade
 	dailyPnL   map[Chain]float64
 	peakEquity map[Chain]float64
+	gasBalance map[Chain]float64
+	gasSpent   map[Chain]float64
 }
 
 func NewStore() *Store {
@@ -53,6 +58,8 @@ func NewStore() *Store {
 		positions:  make(map[string]*Position),
 		dailyPnL:   make(map[Chain]float64),
 		peakEquity: make(map[Chain]float64),
+		gasBalance: make(map[Chain]float64),
+		gasSpent:   make(map[Chain]float64),
 	}
 }
 
@@ -159,4 +166,32 @@ func (s *Store) GetPeakEquity(chain Chain) float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.peakEquity[chain]
+}
+
+func (s *Store) SetGasBalance(chain Chain, amount float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gasBalance[chain] = amount
+}
+
+func (s *Store) GetGasBalance(chain Chain) float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.gasBalance[chain]
+}
+
+func (s *Store) DeductGas(chain Chain, cost float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gasBalance[chain] -= cost
+	if s.gasBalance[chain] < 0 {
+		s.gasBalance[chain] = 0
+	}
+	s.gasSpent[chain] += cost
+}
+
+func (s *Store) GetGasSpent(chain Chain) float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.gasSpent[chain]
 }

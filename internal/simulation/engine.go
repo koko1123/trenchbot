@@ -25,6 +25,8 @@ type SimConfig struct {
 	StartingEquity    float64
 	Chain             state.Chain
 	MinScore          int
+	GasBudget         float64 // gas balance in native token (e.g. 0.25 SOL)
+	GasCostPerTx      float64 // gas cost per transaction (e.g. 0.000505 SOL)
 }
 
 func DefaultSimConfig() SimConfig {
@@ -36,27 +38,38 @@ func DefaultSimConfig() SimConfig {
 		StartingEquity:    1200,
 		Chain:             state.ChainSolana,
 		MinScore:          60,
+		GasBudget:         0.25,
+		GasCostPerTx:      0.000505,
 	}
 }
 
 // SimExecutor tracks price curves and returns prices based on simulated time.
 type SimExecutor struct {
-	mu          sync.RWMutex
-	chain       state.Chain
-	clk         *clock.SimClock
-	curves      map[string][]PricePoint
-	entryTimes  map[string]time.Time
-	buyCalls    int
-	sellCalls   int
+	mu           sync.RWMutex
+	chain        state.Chain
+	clk          *clock.SimClock
+	curves       map[string][]PricePoint
+	entryTimes   map[string]time.Time
+	buyCalls     int
+	sellCalls    int
+	gasCostPerTx float64
 }
 
 func NewSimExecutor(chain state.Chain, clk *clock.SimClock) *SimExecutor {
 	return &SimExecutor{
-		chain:      chain,
-		clk:        clk,
-		curves:     make(map[string][]PricePoint),
-		entryTimes: make(map[string]time.Time),
+		chain:        chain,
+		clk:          clk,
+		curves:       make(map[string][]PricePoint),
+		entryTimes:   make(map[string]time.Time),
+		gasCostPerTx: 0.000505, // default Solana gas
 	}
+}
+
+// SetGasCostPerTx overrides the default per-transaction gas cost.
+func (e *SimExecutor) SetGasCostPerTx(cost float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.gasCostPerTx = cost
 }
 
 func (e *SimExecutor) Chain() state.Chain { return e.chain }
@@ -77,6 +90,7 @@ func (e *SimExecutor) Buy(_ context.Context, params executor.BuyParams) executor
 		TxHash:  "sim-buy-" + params.TokenAddress,
 		Price:   1.0,
 		Amount:  params.Amount,
+		GasCost: e.gasCostPerTx,
 	}
 }
 
@@ -90,6 +104,7 @@ func (e *SimExecutor) Sell(_ context.Context, params executor.SellParams) execut
 		TxHash:  "sim-sell-" + params.TokenAddress,
 		Price:   price,
 		Amount:  params.AmountPct,
+		GasCost: e.gasCostPerTx,
 	}
 }
 
@@ -137,7 +152,15 @@ func NewEngine(cfg SimConfig, log *slog.Logger) *Engine {
 	store.SetPeakEquity(cfg.Chain, cfg.StartingEquity)
 
 	exec := NewSimExecutor(cfg.Chain, clk)
+	if cfg.GasCostPerTx > 0 {
+		exec.SetGasCostPerTx(cfg.GasCostPerTx)
+	}
 	notifier := testutil.NewMockNotifier()
+
+	// Initialize gas balance.
+	if cfg.GasBudget > 0 {
+		store.SetGasBalance(cfg.Chain, cfg.GasBudget)
+	}
 
 	executors := map[state.Chain]executor.Executor{
 		cfg.Chain: exec,
@@ -153,6 +176,8 @@ func NewEngine(cfg SimConfig, log *slog.Logger) *Engine {
 	}, store, clk, log)
 
 	sizer := risk.NewPositionSizer(store, 0.3, 0.05, 8)
+	// Reserve enough gas for ~10 round-trips before refusing to size.
+	sizer.SetGasReserves(cfg.GasCostPerTx*10, 0)
 	filt := filter.New(cfg.MinScore, log)
 	mon := monitor.New(store, executors, notifier, monitor.DefaultExitConfig(), clk, true, log)
 
@@ -285,6 +310,13 @@ func (e *Engine) Run(ctx context.Context) *Report {
 		e.report.ExitsByReason["end-of-sim"]++
 	}
 
+	e.report.GasSpent = e.store.GetGasSpent(e.cfg.Chain)
+	e.report.GasRemaining = e.store.GetGasBalance(e.cfg.Chain)
+	totalTrades := e.report.WinCount + e.report.LossCount
+	if totalTrades > 0 {
+		e.report.GasPerTrade = e.report.GasSpent / float64(totalTrades)
+	}
+
 	e.report.WallClockElapsed = time.Since(wallStart)
 	e.report.Finalize()
 
@@ -334,6 +366,9 @@ func (e *Engine) processToken(ctx context.Context, st SyntheticToken) {
 	e.breaker.RecordSnipe()
 	e.report.TokensBought++
 
+	// Deduct buy gas.
+	e.store.DeductGas(e.cfg.Chain, buyResult.GasCost)
+
 	// Track archetype buy
 	arch := e.archetypes[st.Token.Address]
 	stats := e.report.ArchetypeResults[arch]
@@ -351,6 +386,7 @@ func (e *Engine) processToken(ctx context.Context, st SyntheticToken) {
 		PeakPrice:    1.0,
 		Amount:       size,
 		EntryTime:    e.clk.Now(),
+		EntryGasCost: buyResult.GasCost,
 	})
 }
 

@@ -40,6 +40,10 @@ type Report struct {
 	CircuitBreakerPauses int     `json:"circuit_breaker_pauses"`
 	MarketShocks         int     `json:"market_shocks"`
 
+	GasSpent     float64 `json:"gas_spent"`
+	GasRemaining float64 `json:"gas_remaining"`
+	GasPerTrade  float64 `json:"gas_per_trade"`
+
 	ArchetypeResults map[TokenArchetype]ArchetypeStats `json:"archetype_results"`
 }
 
@@ -82,6 +86,9 @@ func (r *Report) String() string {
 	b.WriteString(fmt.Sprintf("CB Halts:     %d\n", r.CircuitBreakerHalts))
 	b.WriteString(fmt.Sprintf("CB Pauses:    %d\n", r.CircuitBreakerPauses))
 	b.WriteString(fmt.Sprintf("Mkt Shocks:   %d\n", r.MarketShocks))
+	b.WriteString(fmt.Sprintf("Gas Spent:    %.6f\n", r.GasSpent))
+	b.WriteString(fmt.Sprintf("Gas Left:     %.6f\n", r.GasRemaining))
+	b.WriteString(fmt.Sprintf("Gas/Trade:    %.6f\n", r.GasPerTrade))
 	b.WriteString("\n--- Exits by Reason ---\n")
 	for reason, count := range r.ExitsByReason {
 		b.WriteString(fmt.Sprintf("  %-20s %d\n", reason, count))

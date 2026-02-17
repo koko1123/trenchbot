@@ -1,13 +1,12 @@
 package notify
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"time"
+
+	"github.com/getsentry/sentry-go"
 )
 
 type Notifier interface {
@@ -17,86 +16,95 @@ type Notifier interface {
 	DrawdownWarning(ctx context.Context, chain string, drawdownPct float64)
 }
 
-type WebhookNotifier struct {
-	telegramToken string
-	telegramChat  string
-	discordURL    string
-	client        *http.Client
-	log           *slog.Logger
+// Init initializes the Sentry SDK. If dsn is empty, Sentry operates in no-op mode.
+func Init(dsn, environment string) error {
+	if dsn == "" {
+		return nil
+	}
+	return sentry.Init(sentry.ClientOptions{
+		Dsn:              dsn,
+		Environment:      environment,
+		SampleRate:       1.0,
+		TracesSampleRate: 0,
+	})
 }
 
-func New(telegramToken, telegramChat, discordURL string, log *slog.Logger) *WebhookNotifier {
-	return &WebhookNotifier{
-		telegramToken: telegramToken,
-		telegramChat:  telegramChat,
-		discordURL:    discordURL,
-		client:        &http.Client{Timeout: 10 * time.Second},
-		log:           log,
+// Flush drains the Sentry event queue.
+func Flush(timeout time.Duration) {
+	sentry.Flush(timeout)
+}
+
+type SentryNotifier struct {
+	enabled bool
+	log     *slog.Logger
+}
+
+func New(dsn string, log *slog.Logger) *SentryNotifier {
+	return &SentryNotifier{
+		enabled: dsn != "",
+		log:     log,
 	}
 }
 
-func (n *WebhookNotifier) Send(ctx context.Context, msg string) {
-	if n.telegramToken != "" && n.telegramChat != "" {
-		go n.sendTelegram(ctx, msg)
+func (n *SentryNotifier) Send(_ context.Context, msg string) {
+	if !n.enabled {
+		return
 	}
-	if n.discordURL != "" {
-		go n.sendDiscord(ctx, msg)
-	}
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelInfo)
+		scope.SetTag("type", "summary")
+		sentry.CaptureMessage(msg)
+	})
 }
 
-func (n *WebhookNotifier) Snipe(ctx context.Context, chain, symbol, token string, amount, price float64, shadow bool) {
-	mode := "LIVE"
+func (n *SentryNotifier) Snipe(_ context.Context, chain, symbol, token string, amount, price float64, shadow bool) {
+	mode := "live"
 	if shadow {
-		mode = "SHADOW"
+		mode = "shadow"
 	}
-	msg := fmt.Sprintf("[%s] SNIPE %s on %s\nToken: %s\nAmount: %.6f\nPrice: %.8f", mode, symbol, chain, token, amount, price)
-	n.Send(ctx, msg)
-}
+	n.log.Info("SNIPE", "chain", chain, "symbol", symbol, "token", token, "amount", amount, "price", price, "mode", mode)
 
-func (n *WebhookNotifier) Exit(ctx context.Context, chain, symbol string, pnlPct float64, reason string) {
-	msg := fmt.Sprintf("EXIT %s on %s\nPnL: %.1f%%\nReason: %s", symbol, chain, pnlPct, reason)
-	n.Send(ctx, msg)
-}
-
-func (n *WebhookNotifier) DrawdownWarning(ctx context.Context, chain string, drawdownPct float64) {
-	msg := fmt.Sprintf("DRAWDOWN WARNING: %s at %.1f%%", chain, drawdownPct)
-	n.Send(ctx, msg)
-}
-
-func (n *WebhookNotifier) sendTelegram(ctx context.Context, msg string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", n.telegramToken)
-	body, _ := json.Marshal(map[string]string{
-		"chat_id": n.telegramChat,
-		"text":    msg,
+	if !n.enabled {
+		return
+	}
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelInfo)
+		scope.SetTag("chain", chain)
+		scope.SetTag("symbol", symbol)
+		scope.SetTag("mode", mode)
+		scope.SetExtra("token", token)
+		scope.SetExtra("amount", amount)
+		scope.SetExtra("price", price)
+		sentry.CaptureMessage(fmt.Sprintf("SNIPE %s on %s (%.6f @ %.8f)", symbol, chain, amount, price))
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		n.log.Error("telegram request error", "err", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := n.client.Do(req)
-	if err != nil {
-		n.log.Error("telegram send error", "err", err)
-		return
-	}
-	resp.Body.Close()
 }
 
-func (n *WebhookNotifier) sendDiscord(ctx context.Context, msg string) {
-	body, _ := json.Marshal(map[string]string{
-		"content": msg,
+func (n *SentryNotifier) Exit(_ context.Context, chain, symbol string, pnlPct float64, reason string) {
+	n.log.Info("EXIT", "chain", chain, "symbol", symbol, "pnl_pct", pnlPct, "reason", reason)
+
+	if !n.enabled {
+		return
+	}
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelInfo)
+		scope.SetTag("chain", chain)
+		scope.SetTag("symbol", symbol)
+		scope.SetTag("reason", reason)
+		scope.SetExtra("pnl_pct", pnlPct)
+		sentry.CaptureMessage(fmt.Sprintf("EXIT %s on %s: %.1f%% (%s)", symbol, chain, pnlPct, reason))
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.discordURL, bytes.NewReader(body))
-	if err != nil {
-		n.log.Error("discord request error", "err", err)
+}
+
+func (n *SentryNotifier) DrawdownWarning(_ context.Context, chain string, drawdownPct float64) {
+	n.log.Warn("DRAWDOWN", "chain", chain, "drawdown_pct", drawdownPct)
+
+	if !n.enabled {
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := n.client.Do(req)
-	if err != nil {
-		n.log.Error("discord send error", "err", err)
-		return
-	}
-	resp.Body.Close()
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelWarning)
+		scope.SetTag("chain", chain)
+		scope.SetExtra("drawdown_pct", drawdownPct)
+		sentry.CaptureMessage(fmt.Sprintf("DRAWDOWN WARNING: %s at %.1f%%", chain, drawdownPct))
+	})
 }

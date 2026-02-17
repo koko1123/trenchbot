@@ -45,6 +45,9 @@ type pumpTradeRequest struct {
 	Pool             string  `json:"pool"`
 }
 
+// solanaGasCost is the estimated gas per transaction: base fee (5000 lamports) + priority fee.
+const solanaGasCost = 0.000505 // SOL
+
 func (e *PumpFunExecutor) Buy(ctx context.Context, params BuyParams) BuyResult {
 	if params.Shadow {
 		e.log.Info("SHADOW BUY",
@@ -57,6 +60,7 @@ func (e *PumpFunExecutor) Buy(ctx context.Context, params BuyParams) BuyResult {
 			Success: true,
 			TxHash:  "shadow-" + params.TokenAddress[:8],
 			Amount:  params.Amount,
+			GasCost: solanaGasCost,
 		}
 	}
 
@@ -89,6 +93,7 @@ func (e *PumpFunExecutor) Buy(ctx context.Context, params BuyParams) BuyResult {
 		Success: true,
 		TxHash:  result,
 		Amount:  params.Amount,
+		GasCost: solanaGasCost,
 	}
 }
 
@@ -103,6 +108,7 @@ func (e *PumpFunExecutor) Sell(ctx context.Context, params SellParams) SellResul
 		return SellResult{
 			Success: true,
 			TxHash:  "shadow-sell-" + params.TokenAddress[:8],
+			GasCost: solanaGasCost,
 		}
 	}
 
@@ -134,6 +140,7 @@ func (e *PumpFunExecutor) Sell(ctx context.Context, params SellParams) SellResul
 	return SellResult{
 		Success: true,
 		TxHash:  result,
+		GasCost: solanaGasCost,
 	}
 }
 

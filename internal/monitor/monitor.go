@@ -154,10 +154,21 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 		return
 	}
 
-	pnlPct := ((pos.CurrentPrice / pos.EntryPrice) - 1) * 100
+	// Deduct sell gas from the gas balance.
+	m.store.DeductGas(pos.Chain, result.GasCost)
+
+	// Compute P&L adjusted for gas costs (entry gas + exit gas as % of position).
+	rawPnlPct := ((pos.CurrentPrice / pos.EntryPrice) - 1) * 100
+	totalGas := pos.EntryGasCost + result.GasCost
+	gasPctOfPosition := 0.0
+	if pos.Amount > 0 {
+		gasPctOfPosition = (totalGas / pos.Amount) * 100
+	}
+	pnlPct := rawPnlPct - gasPctOfPosition
 
 	m.store.UpdatePosition(pos.ID, func(p *state.Position) {
 		p.SoldPct += sellPct
+		p.ExitGasCost += result.GasCost
 		if p.SoldPct >= 100 {
 			p.Closed = true
 			p.PnL = pnlPct
@@ -170,6 +181,7 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 		"sell_pct", sellPct,
 		"reason", reason,
 		"pnl_pct", pnlPct,
+		"gas_cost", totalGas,
 		"tx", result.TxHash,
 	)
 

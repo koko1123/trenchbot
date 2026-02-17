@@ -74,6 +74,32 @@ func TestSize_BNBChain(t *testing.T) {
 	}
 }
 
+func TestSize_GasReserveBlock(t *testing.T) {
+	store := state.NewStore()
+	ps := NewPositionSizer(store, 0.3, 0.05, 8)
+	ps.SetGasReserves(0.005, 0.002)
+
+	// No gas set — balance is 0, below reserve → should refuse to size.
+	got := ps.Size(state.ChainSolana, 80)
+	if got != 0 {
+		t.Errorf("should refuse to size with no gas, got %f", got)
+	}
+
+	// Set gas above reserve → should size normally.
+	store.SetGasBalance(state.ChainSolana, 0.25)
+	got = ps.Size(state.ChainSolana, 80)
+	if !almostEqual(got, 0.3, 0.001) {
+		t.Errorf("got %f, want 0.3 with sufficient gas", got)
+	}
+
+	// Drain gas below reserve → should refuse.
+	store.DeductGas(state.ChainSolana, 0.248)
+	got = ps.Size(state.ChainSolana, 80)
+	if got != 0 {
+		t.Errorf("should refuse to size with low gas, got %f", got)
+	}
+}
+
 func TestSize_UnknownChain(t *testing.T) {
 	store := state.NewStore()
 	ps := NewPositionSizer(store, 0.3, 0.05, 8)

@@ -38,7 +38,15 @@ func NewEngine(cfg BacktestConfig, log *slog.Logger) *Engine {
 	store.SetPeakEquity(state.ChainSolana, cfg.StartingEquity)
 
 	exec := simulation.NewSimExecutor(state.ChainSolana, clk)
+	if cfg.GasCostPerTx > 0 {
+		exec.SetGasCostPerTx(cfg.GasCostPerTx)
+	}
 	notifier := testutil.NewMockNotifier()
+
+	// Initialize gas balance.
+	if cfg.GasBudget > 0 {
+		store.SetGasBalance(state.ChainSolana, cfg.GasBudget)
+	}
 
 	executors := map[state.Chain]executor.Executor{
 		state.ChainSolana: exec,
@@ -54,6 +62,7 @@ func NewEngine(cfg BacktestConfig, log *slog.Logger) *Engine {
 	}, store, clk, log)
 
 	sizer := risk.NewPositionSizer(store, 0.3, 0.05, 8)
+	sizer.SetGasReserves(cfg.GasCostPerTx*10, 0)
 	filt := filter.New(cfg.MinScore, log)
 	mon := monitor.New(store, executors, notifier, monitor.DefaultExitConfig(), clk, true, log)
 
@@ -177,6 +186,13 @@ func (e *Engine) Run(ctx context.Context, tokens []simulation.SyntheticToken, si
 		e.report.ExitsByReason["end-of-sim"]++
 	}
 
+	e.report.GasSpent = e.store.GetGasSpent(state.ChainSolana)
+	e.report.GasRemaining = e.store.GetGasBalance(state.ChainSolana)
+	totalTrades := e.report.WinCount + e.report.LossCount
+	if totalTrades > 0 {
+		e.report.GasPerTrade = e.report.GasSpent / float64(totalTrades)
+	}
+
 	e.report.WallClockElapsed = time.Since(wallStart)
 	e.report.Finalize()
 
@@ -226,6 +242,9 @@ func (e *Engine) processToken(ctx context.Context, st simulation.SyntheticToken)
 	e.breaker.RecordSnipe()
 	e.report.TokensBought++
 
+	// Deduct buy gas.
+	e.store.DeductGas(state.ChainSolana, buyResult.GasCost)
+
 	posID := fmt.Sprintf("bt-%s-%d", st.Token.Address, e.clk.Now().UnixMilli())
 	e.store.AddPosition(&state.Position{
 		ID:           posID,
@@ -237,6 +256,7 @@ func (e *Engine) processToken(ctx context.Context, st simulation.SyntheticToken)
 		PeakPrice:    1.0,
 		Amount:       size,
 		EntryTime:    e.clk.Now(),
+		EntryGasCost: buyResult.GasCost,
 	})
 }
 
