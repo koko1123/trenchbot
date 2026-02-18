@@ -24,21 +24,29 @@ type ExitConfig struct {
 	EarlyTrailingThreshold   float64 // multiplier above which early trailing activates (e.g. 3.0x)
 	EarlyTrailingStop        float64 // % drop from peak to trigger early trailing exit (e.g. 30%)
 	StaleMultiplierThreshold float64 // positions above this multiplier are not considered stale (default 1.5)
+	UniversalTrailingThreshold float64       // peak multiplier above which universal trailing activates (e.g. 1.15)
+	UniversalTrailingStop      float64       // % drop from peak to exit any position (e.g. 20%)
+	NoTradeTimeout             time.Duration // exit if no trade events for this long (e.g. 2m)
+	NoTradeMaxMult             float64       // only exit dead tokens below this multiplier (e.g. 1.1)
 }
 
 func DefaultExitConfig() ExitConfig {
 	return ExitConfig{
-		Tranche1Pct:            25,
-		Tranche1X:              2.0,
-		Tranche2Pct:            50,
-		Tranche2X:              5.0,
-		TrailingStop:           40,
-		StopLossPct:            50,
-		StaleMinutes:           30,
-		StaleMinutes2:          60,
+		Tranche1Pct:              25,
+		Tranche1X:                1.5,
+		Tranche2Pct:              50,
+		Tranche2X:                5.0,
+		TrailingStop:             40,
+		StopLossPct:              30,
+		StaleMinutes:             30,
+		StaleMinutes2:            60,
 		EarlyTrailingThreshold:   3.0,
 		EarlyTrailingStop:        30,
 		StaleMultiplierThreshold: 1.5,
+		UniversalTrailingThreshold: 1.15,
+		UniversalTrailingStop:      20,
+		NoTradeTimeout:             2 * time.Minute,
+		NoTradeMaxMult:             1.1,
 	}
 }
 
@@ -51,6 +59,7 @@ type Monitor struct {
 	log             *slog.Logger
 	shadow          bool
 	circuitBreakers map[state.Chain]*risk.CircuitBreaker
+	onPositionClose func(chain state.Chain, tokenAddress string)
 }
 
 func New(store *state.Store, executors map[state.Chain]executor.Executor, notifier notify.Notifier, exitCfg ExitConfig, clk clock.Clock, shadow bool, log *slog.Logger) *Monitor {
@@ -67,6 +76,10 @@ func New(store *state.Store, executors map[state.Chain]executor.Executor, notifi
 
 func (m *Monitor) SetCircuitBreakers(cbs map[state.Chain]*risk.CircuitBreaker) {
 	m.circuitBreakers = cbs
+}
+
+func (m *Monitor) SetOnPositionClose(fn func(chain state.Chain, tokenAddress string)) {
+	m.onPositionClose = fn
 }
 
 func (m *Monitor) Run(ctx context.Context) {
@@ -148,6 +161,23 @@ func (m *Monitor) evaluateExit(ctx context.Context, pos *state.Position) {
 		}
 	}
 
+	// Universal trailing stop: protect gains on any position once it's been up.
+	if m.exitCfg.UniversalTrailingThreshold > 0 {
+		peakMult := pos.PeakPrice / entryPrice
+		if peakMult >= m.exitCfg.UniversalTrailingThreshold && dropFromPeak >= m.exitCfg.UniversalTrailingStop {
+			m.executeSell(ctx, pos, 100-pos.SoldPct, "universal-trailing-stop")
+			return
+		}
+	}
+
+	// No-trade-activity exit: dead tokens with no price feed activity.
+	if m.exitCfg.NoTradeTimeout > 0 && !pos.LastTradeTime.IsZero() {
+		if m.clock.Since(pos.LastTradeTime) > m.exitCfg.NoTradeTimeout && multiplier < m.exitCfg.NoTradeMaxMult {
+			m.executeSell(ctx, pos, 100-pos.SoldPct, "no-trade-activity")
+			return
+		}
+	}
+
 	// Stale position exit
 	if m.exitCfg.StaleMinutes > 0 {
 		staleThreshold := time.Duration(m.exitCfg.StaleMinutes) * time.Minute
@@ -223,6 +253,7 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 					p.PnL = -90.0 // assume near-total loss at max slippage
 				})
 				m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pos.TokenAddress, -90.0, "max-slippage-sell")
+				m.firePositionClose(pos.Chain, pos.TokenAddress)
 				return
 			}
 
@@ -235,6 +266,7 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 				p.PnL = -100.0
 			})
 			m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pos.TokenAddress, -100.0, "force-close-honeypot")
+			m.firePositionClose(pos.Chain, pos.TokenAddress)
 		}
 		return
 	}
@@ -302,4 +334,14 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 	)
 
 	m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pos.TokenAddress, pnlPct, reason)
+
+	if pos.SoldPct+sellPct >= 100 {
+		m.firePositionClose(pos.Chain, pos.TokenAddress)
+	}
+}
+
+func (m *Monitor) firePositionClose(chain state.Chain, tokenAddress string) {
+	if m.onPositionClose != nil {
+		m.onPositionClose(chain, tokenAddress)
+	}
 }

@@ -158,6 +158,9 @@ func TestEvaluateExit_StaleNotIfProfitable(t *testing.T) {
 	clk := clock.NewSimClock(start)
 	mon, store, exec, _ := setupMonitor(clk)
 
+	// 1.6x is above StaleMultiplierThreshold (1.5) so stale exit should not fire.
+	// Also above Tranche1X (1.5), so tranche-1 fires instead.
+	// Use 1.4x to test stale protection without triggering tranche.
 	store.AddPosition(&state.Position{
 		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
 		EntryPrice: 1.0, CurrentPrice: 1.6, PeakPrice: 1.6, SoldPct: 0, Amount: 0.3, EntryTime: start,
@@ -167,8 +170,12 @@ func TestEvaluateExit_StaleNotIfProfitable(t *testing.T) {
 	mon.CheckPositions(context.Background())
 
 	sells := exec.GetSellCalls()
-	if len(sells) != 0 {
-		t.Errorf("profitable (1.6x) stale position should NOT be sold, got %d sells", len(sells))
+	// Tranche-1 fires (1.6x >= 1.5x) — position is not stale-sold.
+	if len(sells) != 1 {
+		t.Fatalf("expected tranche-1 sell at 1.6x, got %d sells", len(sells))
+	}
+	if sells[0].AmountPct != 25 {
+		t.Errorf("tranche-1 should sell 25%%, got %.0f%%", sells[0].AmountPct)
 	}
 }
 
@@ -237,8 +244,10 @@ func TestEvaluateExit_EarlyTrailingNotBelowThreshold(t *testing.T) {
 	clk := clock.NewSimClock(time.Now())
 	mon, store, exec, _ := setupMonitor(clk)
 
-	// Peak was 2.5x (below 3x threshold), dropped 30%+ from peak.
-	// Should NOT trigger early trailing.
+	// Peak was 2.5x (below 3x early trailing threshold), dropped 30%+ from peak.
+	// Early trailing should NOT trigger.
+	// However, universal trailing WILL fire (peak 2.5x >= 1.15, drop 40% >= 20%).
+	// So this test now expects a universal-trailing-stop sell.
 	store.AddPosition(&state.Position{
 		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
 		EntryPrice: 1.0, CurrentPrice: 1.5, PeakPrice: 2.5, SoldPct: 25, Amount: 0.3, EntryTime: clk.Now(),
@@ -247,8 +256,120 @@ func TestEvaluateExit_EarlyTrailingNotBelowThreshold(t *testing.T) {
 	mon.CheckPositions(context.Background())
 
 	sells := exec.GetSellCalls()
+	if len(sells) != 1 {
+		t.Fatalf("expected universal trailing stop sell, got %d sells", len(sells))
+	}
+	if sells[0].AmountPct != 75 {
+		t.Errorf("universal trailing should sell remaining 75%%, got %.0f%%", sells[0].AmountPct)
+	}
+}
+
+func TestEvaluateExit_UniversalTrailingStop(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	mon, store, exec, _ := setupMonitor(clk)
+
+	// Peak was 1.4x (above 1.15 universal threshold), now at 1.0x.
+	// dropFromPeak = (1.4-1.0)/1.4*100 = 28.6% >= 20%.
+	// No tranches sold. Universal trailing should fire.
+	store.AddPosition(&state.Position{
+		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
+		EntryPrice: 1.0, CurrentPrice: 1.0, PeakPrice: 1.4, SoldPct: 0, Amount: 0.3, EntryTime: clk.Now(),
+	})
+
+	mon.CheckPositions(context.Background())
+
+	sells := exec.GetSellCalls()
+	if len(sells) != 1 {
+		t.Fatalf("expected 1 sell for universal trailing stop, got %d", len(sells))
+	}
+	if sells[0].AmountPct != 100 {
+		t.Errorf("universal trailing should sell 100%%, got %.0f%%", sells[0].AmountPct)
+	}
+}
+
+func TestEvaluateExit_UniversalTrailingNotBelowThreshold(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	mon, store, exec, _ := setupMonitor(clk)
+
+	// Peak was 1.1x (below 1.15 universal threshold). Should NOT trigger.
+	store.AddPosition(&state.Position{
+		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "TEST",
+		EntryPrice: 1.0, CurrentPrice: 0.8, PeakPrice: 1.1, SoldPct: 0, Amount: 0.3, EntryTime: clk.Now(),
+	})
+
+	mon.CheckPositions(context.Background())
+
+	sells := exec.GetSellCalls()
 	if len(sells) != 0 {
-		t.Errorf("early trailing should NOT trigger below threshold, got %d sells", len(sells))
+		t.Errorf("universal trailing should NOT trigger below threshold, got %d sells", len(sells))
+	}
+}
+
+func TestEvaluateExit_NoTradeActivity(t *testing.T) {
+	start := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	clk := clock.NewSimClock(start)
+	mon, store, exec, _ := setupMonitor(clk)
+
+	// Position near entry (1.05x < 1.1 NoTradeMaxMult) with LastTradeTime 3 min ago.
+	store.AddPosition(&state.Position{
+		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "DEAD",
+		EntryPrice: 1.0, CurrentPrice: 1.05, PeakPrice: 1.05, Amount: 0.3,
+		EntryTime: start, LastTradeTime: start,
+	})
+
+	// Advance 3 minutes (> 2 min NoTradeTimeout default).
+	clk.Advance(3 * time.Minute)
+	mon.CheckPositions(context.Background())
+
+	sells := exec.GetSellCalls()
+	if len(sells) != 1 {
+		t.Fatalf("expected 1 sell for no-trade-activity, got %d", len(sells))
+	}
+	if sells[0].AmountPct != 100 {
+		t.Errorf("no-trade-activity should sell 100%%, got %.0f%%", sells[0].AmountPct)
+	}
+}
+
+func TestEvaluateExit_NoTradeActivityNotIfProfitable(t *testing.T) {
+	start := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	clk := clock.NewSimClock(start)
+	mon, store, exec, _ := setupMonitor(clk)
+
+	// Position at 1.2x (above 1.1 NoTradeMaxMult), no trades for 3 min.
+	// Should NOT trigger no-trade-activity.
+	store.AddPosition(&state.Position{
+		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "ALIVE",
+		EntryPrice: 1.0, CurrentPrice: 1.2, PeakPrice: 1.2, Amount: 0.3,
+		EntryTime: start, LastTradeTime: start,
+	})
+
+	clk.Advance(3 * time.Minute)
+	mon.CheckPositions(context.Background())
+
+	sells := exec.GetSellCalls()
+	if len(sells) != 0 {
+		t.Errorf("no-trade-activity should NOT trigger above NoTradeMaxMult, got %d sells", len(sells))
+	}
+}
+
+func TestEvaluateExit_NoTradeActivityNotIfRecent(t *testing.T) {
+	start := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	clk := clock.NewSimClock(start)
+	mon, store, exec, _ := setupMonitor(clk)
+
+	// Position near entry but LastTradeTime is recent (1 min ago < 2 min timeout).
+	store.AddPosition(&state.Position{
+		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "RECENT",
+		EntryPrice: 1.0, CurrentPrice: 1.05, PeakPrice: 1.05, Amount: 0.3,
+		EntryTime: start, LastTradeTime: start.Add(30 * time.Second),
+	})
+
+	clk.Advance(1 * time.Minute)
+	mon.CheckPositions(context.Background())
+
+	sells := exec.GetSellCalls()
+	if len(sells) != 0 {
+		t.Errorf("no-trade-activity should NOT trigger with recent trades, got %d sells", len(sells))
 	}
 }
 

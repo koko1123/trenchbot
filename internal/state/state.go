@@ -32,8 +32,9 @@ type Position struct {
 	PnL           float64
 	EntryGasCost  float64 // gas paid on buy tx (native token)
 	ExitGasCost   float64 // cumulative gas paid on sell tx(s)
-	SellFailures  int     // consecutive sell failures
-	EntryPriceUSD float64 // USD price at entry (set on first price lookup)
+	SellFailures  int       // consecutive sell failures
+	EntryPriceUSD float64   // USD price at entry (set on first price lookup)
+	LastTradeTime time.Time // last trade event received from price feed
 }
 
 type Trade struct {

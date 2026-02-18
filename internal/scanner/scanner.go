@@ -21,6 +21,15 @@ type NewToken struct {
 	Metadata     map[string]interface{}
 }
 
+// TokenTrade represents a trade event received from a real-time feed.
+type TokenTrade struct {
+	Mint         string
+	TxType       string  // "buy" or "sell"
+	SolAmount    float64 // SOL value of this trade
+	MarketCapSol float64
+	UsdMarketCap float64
+}
+
 type Scanner interface {
 	// Scan starts scanning for new tokens and sends them to the channel.
 	// It blocks until the context is cancelled.

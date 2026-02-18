@@ -198,14 +198,6 @@ func (e *PumpFunExecutor) Sell(ctx context.Context, params SellParams) SellResul
 	}
 }
 
-// pumpFunCoinResponse is the response from PumpFun's coin data API.
-type pumpFunCoinResponse struct {
-	UsdMarketCap       float64 `json:"usd_market_cap"`
-	VirtualSolReserves float64 `json:"virtual_sol_reserves"`
-	VirtualTokenRes    float64 `json:"virtual_token_reserves"`
-	Complete           bool    `json:"complete"` // true = graduated to Raydium
-}
-
 // jupiterPriceResponse is the response from Jupiter Price API v2.
 type jupiterPriceResponse struct {
 	Data map[string]struct {
@@ -213,53 +205,11 @@ type jupiterPriceResponse struct {
 	} `json:"data"`
 }
 
-// CurrentPrice returns the current USD price for a token. It tries the PumpFun
-// bonding curve API first (works for pre-graduation tokens), falling back to
-// Jupiter Price API for graduated tokens.
+// CurrentPrice returns the current USD price for a token via Jupiter Price API.
+// This works for graduated tokens (post-Raydium). Pre-graduation tokens get
+// prices from the PumpPortal WebSocket trade feed instead.
 func (e *PumpFunExecutor) CurrentPrice(ctx context.Context, tokenAddress string) (float64, error) {
-	// Try PumpFun API first (works for pre-graduation tokens).
-	price, err := e.pumpFunPrice(ctx, tokenAddress)
-	if err == nil && price > 0 {
-		return price, nil
-	}
-
-	// Fall back to Jupiter for graduated tokens.
 	return e.jupiterPrice(ctx, tokenAddress)
-}
-
-func (e *PumpFunExecutor) pumpFunPrice(ctx context.Context, tokenAddress string) (float64, error) {
-	url := fmt.Sprintf("https://frontend-api-v3.pump.fun/coins/%s", tokenAddress)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return 0, fmt.Errorf("creating pumpfun price request: %w", err)
-	}
-
-	resp, err := e.http.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("fetching pumpfun price: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("pumpfun API returned status %d", resp.StatusCode)
-	}
-
-	var coin pumpFunCoinResponse
-	if err := json.NewDecoder(resp.Body).Decode(&coin); err != nil {
-		return 0, fmt.Errorf("decoding pumpfun response: %w", err)
-	}
-
-	// Compute price from bonding curve reserves (in lamports → SOL → USD).
-	if coin.VirtualTokenRes > 0 && coin.VirtualSolReserves > 0 {
-		// Reserves are in lamports (1e9 per SOL) and smallest token units.
-		// Price per token in SOL = virtualSolReserves / virtualTokenReserves
-		// We use usd_market_cap as a simpler proxy since PumpFun provides it directly.
-		if coin.UsdMarketCap > 0 {
-			return coin.UsdMarketCap, nil
-		}
-	}
-
-	return 0, fmt.Errorf("pumpfun: no price data for %s", SafePrefix(tokenAddress, 12))
 }
 
 func (e *PumpFunExecutor) jupiterPrice(ctx context.Context, tokenAddress string) (float64, error) {

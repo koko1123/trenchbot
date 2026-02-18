@@ -47,7 +47,7 @@ type Config struct {
 	MinGasReserveBNB float64 `envconfig:"MIN_GAS_RESERVE_BNB" default:"0.002"`
 
 	// Filter
-	MinScoreThreshold    int  `envconfig:"MIN_SCORE_THRESHOLD" default:"40"`
+	MinScoreThreshold    int  `envconfig:"MIN_SCORE_THRESHOLD" default:"55"`
 	HoneypotCheckEnabled bool `envconfig:"HONEYPOT_CHECK_ENABLED" default:"true"`
 
 	// Execution
@@ -57,6 +57,16 @@ type Config struct {
 
 	// Bitquery polling
 	BitqueryPollIntervalSec int `envconfig:"BITQUERY_POLL_INTERVAL_SEC" default:"2"`
+
+	// Exit strategy
+	StopLossPct              float64 `envconfig:"STOP_LOSS_PCT" default:"30"`
+	Tranche1X                float64 `envconfig:"TRANCHE1_X" default:"1.5"`
+	UniversalTrailingThreshold float64 `envconfig:"TRAILING_THRESHOLD" default:"1.15"`
+	UniversalTrailingStop    float64 `envconfig:"TRAILING_STOP_PCT" default:"20"`
+	NoTradeTimeoutSec        int     `envconfig:"NO_TRADE_TIMEOUT_S" default:"120"`
+	NoTradeMaxMult           float64 `envconfig:"NO_TRADE_MAX_MULT" default:"1.1"`
+	MinTradesBeforeBuy       int     `envconfig:"MIN_TRADES_BEFORE_BUY" default:"5"`
+	TradeObservationSecs     int     `envconfig:"TRADE_OBSERVATION_SECS" default:"5"`
 
 	// State persistence
 	StateSnapshotPath string `envconfig:"STATE_SNAPSHOT_PATH" default:"state.json"`

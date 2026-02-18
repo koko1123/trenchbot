@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -172,7 +173,14 @@ func main() {
 		}
 	}
 
-	mon := monitor.New(store, executors, notifier, monitor.DefaultExitConfig(), clk, !cfg.IsLive(), log)
+	exitCfg := monitor.DefaultExitConfig()
+	exitCfg.StopLossPct = cfg.StopLossPct
+	exitCfg.Tranche1X = cfg.Tranche1X
+	exitCfg.UniversalTrailingThreshold = cfg.UniversalTrailingThreshold
+	exitCfg.UniversalTrailingStop = cfg.UniversalTrailingStop
+	exitCfg.NoTradeTimeout = time.Duration(cfg.NoTradeTimeoutSec) * time.Second
+	exitCfg.NoTradeMaxMult = cfg.NoTradeMaxMult
+	mon := monitor.New(store, executors, notifier, exitCfg, clk, !cfg.IsLive(), log)
 
 	cbs := map[state.Chain]*risk.CircuitBreaker{
 		state.ChainSolana: solCB,
@@ -183,9 +191,19 @@ func main() {
 	mon.SetCircuitBreakers(cbs)
 
 	tokenCh := make(chan scanner.NewToken, 100)
+	tradeCh := make(chan scanner.TokenTrade, 256)
 	var wg sync.WaitGroup
 
 	pumpScanner := scanner.NewPumpFunScanner(cfg.PumpPortalWSURL, log)
+	pumpScanner.SetTradeChannel(tradeCh)
+
+	// Unsubscribe from trade feed when positions close.
+	mon.SetOnPositionClose(func(chain state.Chain, tokenAddress string) {
+		if chain == state.ChainSolana {
+			pumpScanner.UnsubscribeToken(tokenAddress)
+		}
+	})
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -214,46 +232,54 @@ func main() {
 		mon.Run(ctx)
 	}()
 
-	// Price update goroutine: polls current USD prices every 10 seconds and
-	// converts to normalized prices relative to entry for the monitor.
+	// Pre-buy trade counters: tracks trade volume per mint for observation window.
+	var tradeCounters sync.Map // mint -> *int64
+
+	// Trade event listener: receives real-time trade events from PumpPortal
+	// WebSocket and updates position prices accordingly.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		priceTicker := time.NewTicker(10 * time.Second)
-		defer priceTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-priceTicker.C:
+			case trade := <-tradeCh:
+				// Increment pre-buy trade counter (even for zero mcap trades).
+				if v, ok := tradeCounters.Load(trade.Mint); ok {
+					atomic.AddInt64(v.(*int64), 1)
+				}
+				if trade.MarketCapSol <= 0 {
+					continue
+				}
+				// Use SOL-denominated market cap as the price signal.
+				// The absolute value doesn't matter — only the ratio
+				// (current / entry) drives the multiplier.
+				mcapSol := trade.MarketCapSol
 				for _, pos := range store.AllOpenPositions() {
-					exec, ok := executors[pos.Chain]
-					if !ok {
+					if pos.TokenAddress != trade.Mint {
 						continue
 					}
-					pf, ok := exec.(executor.PriceFeed)
-					if !ok {
-						continue
-					}
-					usdPrice, err := pf.CurrentPrice(ctx, pos.TokenAddress)
-					if err != nil || usdPrice <= 0 {
-						log.Debug("price fetch failed", "token", pos.TokenSymbol, "err", err)
-						continue
-					}
+					var multiplier float64
+					tradeNow := time.Now()
 					store.UpdatePosition(pos.ID, func(p *state.Position) {
-						// First successful price lookup: record the entry USD price.
+						p.LastTradeTime = tradeNow
 						if p.EntryPriceUSD <= 0 {
-							p.EntryPriceUSD = usdPrice
+							p.EntryPriceUSD = mcapSol
 						}
-						// Convert USD price to normalized price (relative to entry).
-						// EntryPrice is 1.0, so multiplier = usdPrice / entryUSD.
 						if p.EntryPriceUSD > 0 {
-							p.CurrentPrice = p.EntryPrice * (usdPrice / p.EntryPriceUSD)
+							p.CurrentPrice = p.EntryPrice * (mcapSol / p.EntryPriceUSD)
+							multiplier = p.CurrentPrice / p.EntryPrice
 							if p.CurrentPrice > p.PeakPrice {
 								p.PeakPrice = p.CurrentPrice
 							}
 						}
 					})
+					log.Debug("price updated from trade feed",
+						"token", pos.TokenSymbol,
+						"mcap_sol", mcapSol,
+						"multiplier", multiplier,
+					)
 				}
 			}
 		}
@@ -415,7 +441,7 @@ func main() {
 					<-workerSem // release
 					pendingTokens.Delete(t.Address)
 				}()
-				processToken(ctx, t, tokenFilter, sizer, executors, store, notifier, rep, reportStore, solCB, bnbCB, cfg, log)
+				processToken(ctx, t, tokenFilter, sizer, executors, store, notifier, rep, reportStore, solCB, bnbCB, pumpScanner, &tradeCounters, cfg, log)
 			}(token)
 		}
 	}
@@ -433,12 +459,47 @@ func processToken(
 	reportStore *reporter.ReportStore,
 	solCB *risk.CircuitBreaker,
 	bnbCB *risk.CircuitBreaker,
+	pumpScanner *scanner.PumpFunScanner,
+	tradeCounters *sync.Map,
 	cfg *config.Config,
 	log *slog.Logger,
 ) {
 	result := f.Evaluate(ctx, token)
 	if !result.Approved {
 		return
+	}
+
+	// Volume-aware pre-buy check: observe trade activity before committing capital.
+	if cfg.MinTradesBeforeBuy > 0 && token.Chain == state.ChainSolana {
+		var counter int64
+		tradeCounters.Store(token.Address, &counter)
+		pumpScanner.SubscribeToken(token.Address)
+
+		observeDuration := time.Duration(cfg.TradeObservationSecs) * time.Second
+		select {
+		case <-time.After(observeDuration):
+		case <-ctx.Done():
+			tradeCounters.Delete(token.Address)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		trades := atomic.LoadInt64(&counter)
+		tradeCounters.Delete(token.Address)
+
+		if trades < int64(cfg.MinTradesBeforeBuy) {
+			log.Debug("token failed volume check, skipping buy",
+				"token", token.Symbol,
+				"trades", trades,
+				"required", cfg.MinTradesBeforeBuy,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+		log.Debug("token passed volume check",
+			"token", token.Symbol,
+			"trades", trades,
+		)
 	}
 
 	var cb *risk.CircuitBreaker
@@ -450,17 +511,26 @@ func processToken(
 	}
 	if cb == nil || !cb.CanSnipe() {
 		log.Debug("snipe blocked by circuit breaker", "chain", token.Chain, "token", token.Symbol)
+		if token.Chain == state.ChainSolana {
+			pumpScanner.UnsubscribeToken(token.Address)
+		}
 		return
 	}
 
 	if !store.TryReserveSlot(token.Chain, cfg.MaxPositionsPerChain, cfg.MaxPositionsTotal) {
 		log.Debug("position limit reached", "chain", token.Chain)
+		if token.Chain == state.ChainSolana {
+			pumpScanner.UnsubscribeToken(token.Address)
+		}
 		return
 	}
 
 	size := sizer.Size(token.Chain, result.Score)
 	if size <= 0 {
 		store.ReleaseSlot(token.Chain)
+		if token.Chain == state.ChainSolana {
+			pumpScanner.UnsubscribeToken(token.Address)
+		}
 		return
 	}
 
@@ -468,6 +538,9 @@ func processToken(
 	if !ok {
 		log.Error("no executor for chain", "chain", token.Chain)
 		store.ReleaseSlot(token.Chain)
+		if token.Chain == state.ChainSolana {
+			pumpScanner.UnsubscribeToken(token.Address)
+		}
 		return
 	}
 
@@ -483,6 +556,9 @@ func processToken(
 	if buyResult.Error != nil {
 		cb.RecordError()
 		store.ReleaseSlot(token.Chain)
+		if token.Chain == state.ChainSolana {
+			pumpScanner.UnsubscribeToken(token.Address)
+		}
 		return
 	}
 
@@ -502,8 +578,9 @@ func processToken(
 		PeakPrice:    buyResult.Price,
 		Amount:       buyResult.Amount,
 		TokenBalance: buyResult.TokenAmount,
-		EntryTime:    time.Now(),
-		EntryGasCost: buyResult.GasCost,
+		EntryTime:     time.Now(),
+		LastTradeTime: time.Now(),
+		EntryGasCost:  buyResult.GasCost,
 	})
 	store.ConsumeSlot(token.Chain)
 
@@ -543,6 +620,11 @@ func processToken(
 	}
 
 	notifier.Snipe(ctx, string(token.Chain), token.Symbol, token.Address, size, buyResult.Price, shadow)
+
+	// Subscribe to real-time trade events for this token's price updates.
+	if token.Chain == state.ChainSolana {
+		pumpScanner.SubscribeToken(token.Address)
+	}
 
 	// Run honeypot check asynchronously after the buy. If the token is flagged,
 	// the position will be force-closed without blocking the pipeline.
