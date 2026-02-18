@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,13 +15,16 @@ import (
 	"github.com/cindocode/trenchbot/internal/config"
 	"github.com/cindocode/trenchbot/internal/executor"
 	"github.com/cindocode/trenchbot/internal/filter"
+	"github.com/cindocode/trenchbot/internal/flow"
+	"github.com/cindocode/trenchbot/internal/gas"
+	"github.com/cindocode/trenchbot/internal/jito"
 	"github.com/cindocode/trenchbot/internal/monitor"
 	"github.com/cindocode/trenchbot/internal/notify"
 	"github.com/cindocode/trenchbot/internal/reporter"
 	"github.com/cindocode/trenchbot/internal/risk"
 	"github.com/cindocode/trenchbot/internal/scanner"
 	"github.com/cindocode/trenchbot/internal/state"
-	bnbclient "github.com/cindocode/trenchbot/pkg/bnb"
+	"github.com/cindocode/trenchbot/internal/wallet"
 	solanaclient "github.com/cindocode/trenchbot/pkg/solana"
 )
 
@@ -90,25 +93,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	bnbClient, err := bnbclient.NewClient(cfg.BNBRPCURL, cfg.BNBPrivateKey, log)
-	if err != nil {
-		log.Warn("failed to init BNB client, disabling BNB chain", "err", err)
-		bnbClient = nil
-	}
-
 	// Query actual wallet balance for circuit breaker starting equity.
 	solBalance := 1.0 // fallback
 	if bal, err := solClient.GetBalance(context.Background()); err == nil {
 		solBalance = bal
 		log.Info("solana wallet balance", "sol", solBalance)
-	}
-
-	var bnbBalance float64 = 1.0 // fallback
-	if bnbClient != nil {
-		if bal, err := bnbClient.GetBalanceBNB(context.Background()); err == nil {
-			bnbBalance = bal
-			log.Info("bnb wallet balance", "bnb", bnbBalance)
-		}
 	}
 
 	solCB := risk.NewCircuitBreaker(risk.CircuitBreakerConfig{
@@ -120,33 +109,45 @@ func main() {
 		StartingEquity:     solBalance,
 	}, store, clk, log)
 
-	var bnbCB *risk.CircuitBreaker
-	if bnbClient != nil {
-		bnbCB = risk.NewCircuitBreaker(risk.CircuitBreakerConfig{
-			Chain:              state.ChainBNB,
-			MaxDrawdownPct:     cfg.TotalDrawdownLimitPct,
-			HeatFullPct:        cfg.HeatFullPct,
-			ConsecutiveLossCap: cfg.ConsecutiveLossPauseThresh,
-			MaxSnipesPerHour:   cfg.MaxSnipesPerHour,
-			StartingEquity:     bnbBalance,
-		}, store, clk, log)
+	// Initialize gas balance from actual wallet balance.
+	store.SetGasBalance(state.ChainSolana, solBalance)
+
+	// Configure Helius API if key provided.
+	if cfg.HeliusAPIKey != "" {
+		solClient.SetHeliusKey(cfg.HeliusAPIKey)
+		log.Info("helius API configured")
 	}
 
-	// Initialize gas balances from actual wallet balance.
-	store.SetGasBalance(state.ChainSolana, solBalance)
-	store.SetGasBalance(state.ChainBNB, bnbBalance)
+	// Configure fallback RPCs.
+	if cfg.SolanaRPCFallbackURLs != "" {
+		urls := strings.Split(cfg.SolanaRPCFallbackURLs, ",")
+		solClient.SetFallbackRPCs(urls)
+		log.Info("solana fallback RPCs configured", "count", len(urls))
+	}
 
-	sizer := risk.NewPositionSizer(store, cfg.SolanaSnipeAmount, cfg.BNBSnipeAmount)
+	// Performance tracker (Phase 4: Kelly criterion).
+	perfTracker := risk.NewPerformanceTracker(cfg.KellyWindowSize)
+
+	sizer := risk.NewPositionSizer(store, cfg.SolanaSnipeAmount)
 	sizer.SetMaxPositions(cfg.MaxPositionsTotal)
 	sizer.SetHeatFunc(solCB.Heat)
-	sizer.SetGasReserves(cfg.MinGasReserveSOL, cfg.MinGasReserveBNB)
+	sizer.SetGasReserve(cfg.MinGasReserveSOL)
+
+	// Wire Kelly criterion if enabled.
+	if cfg.KellyEnabled {
+		sizer.SetPerformanceTracker(perfTracker)
+		log.Info("kelly criterion sizing enabled", "window", cfg.KellyWindowSize)
+	}
+
+	// Enable dynamic position limits (scales with available capital).
+	if cfg.DynamicPositionLimits {
+		sizer.EnableDynamicLimits(cfg.PositionScaleFactor)
+		log.Info("dynamic position limits enabled", "scale_factor", cfg.PositionScaleFactor)
+	}
 
 	// Reporter (works with nil reportStore).
 	rep := reporter.New(reportStore, store, log)
 	rep.SetCircuitBreaker(state.ChainSolana, solCB)
-	if bnbCB != nil {
-		rep.SetCircuitBreaker(state.ChainBNB, bnbCB)
-	}
 
 	tokenFilter := filter.New(cfg.MinScoreThreshold, log)
 	tokenFilter.SetDynamicThreshold(80, solCB.Heat)
@@ -162,18 +163,47 @@ func main() {
 		tokenFilter.SetCreatorLookup(reportStore)
 	}
 
+	// Wire holder distribution checker (Phase 2A).
+	if cfg.HolderCheckEnabled && cfg.HeliusAPIKey != "" {
+		tokenFilter.SetHolderChecker(&heliusHolderAdapter{client: solClient}, cfg.MaxTopHolderPct)
+		log.Info("holder distribution checking enabled", "max_top_holder_pct", cfg.MaxTopHolderPct)
+	}
+
 	executors := make(map[state.Chain]executor.Executor)
 	pumpExec := executor.NewPumpFunExecutor(cfg.PumpPortalTradeURL, solClient, cfg.SlippagePctSOL, log)
-	executors[state.ChainSolana] = pumpExec
 
-	if bnbClient != nil {
-		fourExec, err := executor.NewFourMemeExecutor(bnbClient, cfg.FourMemeProxyContract, log)
-		if err != nil {
-			log.Warn("failed to init four.meme executor", "err", err)
-		} else {
-			executors[state.ChainBNB] = fourExec
-		}
+	// Wire dynamic slippage (Phase 3A).
+	if cfg.DynamicSlippageEnabled {
+		pumpExec.SetDynamicSlippage(true, solCB.Heat)
+		log.Info("dynamic slippage enabled")
 	}
+
+	// Wire Helius priority fee estimates (Phase 3B).
+	if cfg.HeliusAPIKey != "" {
+		pumpExec.SetFeeEstimator(solClient.GetPriorityFeeEstimate)
+		log.Info("helius priority fee estimates enabled")
+	}
+
+	// Wire Jito bundle submission (Phase 2A).
+	if cfg.JitoEnabled {
+		jitoClient := jito.NewClient(cfg.JitoBlockEngineURL, cfg.JitoTipLamports)
+		pumpExec.SetJitoClient(jitoClient)
+		log.Info("jito bundle submission enabled", "url", cfg.JitoBlockEngineURL, "tip_lamports", cfg.JitoTipLamports)
+	}
+
+	// Wire multi-wallet rotation (Phase 2B).
+	if cfg.WalletRotationEnabled && cfg.SolanaPrivateKeys != "" {
+		keys := strings.Split(cfg.SolanaPrivateKeys, ",")
+		wp, err := wallet.NewPool(keys)
+		if err != nil {
+			log.Error("failed to init wallet pool", "err", err)
+			os.Exit(1)
+		}
+		pumpExec.SetWalletPool(wp)
+		log.Info("wallet rotation enabled", "wallets", wp.Count())
+	}
+
+	executors[state.ChainSolana] = pumpExec
 
 	exitCfg := monitor.DefaultExitConfig()
 	exitCfg.StopLossPct = cfg.StopLossPct
@@ -184,13 +214,26 @@ func main() {
 	exitCfg.NoTradeMaxMult = cfg.NoTradeMaxMult
 	mon := monitor.New(store, executors, notifier, exitCfg, clk, !cfg.IsLive(), log)
 
-	cbs := map[state.Chain]*risk.CircuitBreaker{
+	mon.SetCircuitBreakers(map[state.Chain]*risk.CircuitBreaker{
 		state.ChainSolana: solCB,
+	})
+	mon.SetPerformanceTracker(perfTracker)
+
+	// Anti-bot intelligence (Phase 3).
+	bundleDetector := filter.NewBundleDetector(cfg.BundleDetectionEnabled)
+	reputationDB := filter.NewReputationDB()
+	botDB := flow.NewBotDB(5)               // flag addresses seen in early buys on 5+ tokens
+	var creatorMap sync.Map                   // tokenAddress -> creator address
+	log.Info("anti-bot intelligence initialized",
+		"bundle_detection", cfg.BundleDetectionEnabled,
+	)
+
+	// Bot dump delayed entry (Phase 3D).
+	var delayedEntry *flow.DelayedEntry
+	if cfg.BotDumpDelayEnabled {
+		delayedEntry = flow.NewDelayedEntry(time.Duration(cfg.BotDumpDelaySec) * time.Second)
+		log.Info("bot dump delayed entry enabled", "delay_sec", cfg.BotDumpDelaySec)
 	}
-	if bnbCB != nil {
-		cbs[state.ChainBNB] = bnbCB
-	}
-	mon.SetCircuitBreakers(cbs)
 
 	tokenCh := make(chan scanner.NewToken, 100)
 	tradeCh := make(chan scanner.TokenTrade, 256)
@@ -199,10 +242,29 @@ func main() {
 	pumpScanner := scanner.NewPumpFunScanner(cfg.PumpPortalWSURL, log)
 	pumpScanner.SetTradeChannel(tradeCh)
 
-	// Unsubscribe from trade feed when positions close.
+	// Unsubscribe from trade feed when positions close + update creator reputation.
 	mon.SetOnPositionClose(func(chain state.Chain, tokenAddress string) {
 		if chain == state.ChainSolana {
 			pumpScanner.UnsubscribeToken(tokenAddress)
+		}
+		// Update creator reputation from closed position.
+		creatorVal, ok := creatorMap.LoadAndDelete(tokenAddress)
+		if !ok {
+			return
+		}
+		creator := creatorVal.(string)
+		// Find the position by token address to get peak mult.
+		for _, pos := range store.AllOpenPositions() {
+			if pos.TokenAddress != tokenAddress {
+				continue
+			}
+			peakMult := 1.0
+			if pos.EntryPrice > 0 {
+				peakMult = pos.PeakPrice / pos.EntryPrice
+			}
+			isRug := peakMult < 0.3
+			reputationDB.RecordOutcome(creator, peakMult, pos.HoldDuration, isRug)
+			break
 		}
 	})
 
@@ -214,28 +276,101 @@ func main() {
 		}
 	}()
 
-	if bnbClient != nil && cfg.BitqueryAPIKey != "" {
-		pollInterval := time.Duration(cfg.BitqueryPollIntervalSec) * time.Second
-		fourScanner := scanner.NewFourMemeScanner(cfg.BitqueryAPIURL, cfg.BitqueryAPIKey, cfg.FourMemeProxyContract, pollInterval, log)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := fourScanner.Scan(ctx, tokenCh); err != nil && ctx.Err() == nil {
-				log.Error("four.meme scanner error", "err", err)
-			}
-		}()
-	} else if bnbClient != nil {
-		log.Info("four.meme scanner disabled (no BITQUERY_API_KEY)")
-	}
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		mon.Run(ctx)
 	}()
 
-	// Pre-buy trade counters: tracks trade volume per mint for observation window.
-	var tradeCounters sync.Map // mint -> *int64
+	// Alpha monitor (Phase 6).
+	if cfg.AlphaMonitorEnabled {
+		origMinScore := cfg.MinScoreThreshold
+		origMaxPositions := cfg.MaxPositionsTotal
+		alphaMonitor := risk.NewAlphaMonitor(perfTracker, risk.AlphaMonitorConfig{}, log)
+		alphaMonitor.SetOnDegrade(func() {
+			tokenFilter.SetDynamicThreshold(90, solCB.Heat) // tighten threshold
+			sizer.SetMaxPositions(origMaxPositions / 2)
+			log.Warn("alpha degradation: tightened filter and reduced positions")
+		})
+		alphaMonitor.SetOnRecover(func() {
+			tokenFilter.SetDynamicThreshold(80, solCB.Heat) // restore
+			sizer.SetMaxPositions(origMaxPositions)
+			log.Info("alpha recovered: restored filter and positions")
+		})
+		_ = origMinScore // used by degrade/recover callbacks via closure
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			alphaMonitor.Run(ctx.Done())
+		}()
+		log.Info("alpha monitor enabled")
+	}
+
+	// Pre-buy trade observers: tracks rich flow data per mint for observation window.
+	var tradeObservers sync.Map // mint -> *flow.Observer
+
+	// Semaphore to bound concurrent buy goroutines.
+	workerSem := make(chan struct{}, cfg.MaxConcurrentBuys)
+
+	// Bot dump delayed entry poller: re-evaluates tokens after bot dump wave.
+	if delayedEntry != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					for _, dt := range delayedEntry.Ready() {
+						token, ok := dt.Original.(scanner.NewToken)
+						if !ok {
+							continue
+						}
+						log.Info("delayed entry: re-evaluating post-bot-dump",
+							"token", token.Symbol,
+							"mint", token.Address,
+						)
+						// Run a second observation window to check if organic buyers returned.
+						observer := flow.NewObserver()
+						tradeObservers.Store(token.Address, observer)
+						pumpScanner.SubscribeToken(token.Address)
+
+						time.Sleep(time.Duration(cfg.TradeObservationSecs) * time.Second)
+
+						recheck := observer.Result()
+						tradeObservers.Delete(token.Address)
+
+						if recheck.OFI < cfg.MinOFIThreshold || recheck.TradeCount < cfg.MinTradesBeforeBuy {
+							log.Debug("delayed entry: OFI still weak post-dump, skipping",
+								"token", token.Symbol,
+								"ofi", recheck.OFI,
+								"trades", recheck.TradeCount,
+							)
+							pumpScanner.UnsubscribeToken(token.Address)
+							continue
+						}
+
+						log.Info("delayed entry: organic activity recovered, proceeding to buy",
+							"token", token.Symbol,
+							"ofi", recheck.OFI,
+							"trades", recheck.TradeCount,
+						)
+						// Re-enter the buy pipeline.
+						go func(t scanner.NewToken) {
+							workerSem <- struct{}{} // acquire
+							defer func() { <-workerSem }()
+							processToken(ctx, t, tokenFilter, sizer, executors, store, notifier, rep, reportStore,
+								solCB, pumpScanner, &tradeObservers, perfTracker, bundleDetector, reputationDB, botDB, delayedEntry, &creatorMap, cfg, log)
+						}(token)
+					}
+				}
+			}
+		}()
+	}
 
 	// Trade event listener: receives real-time trade events from PumpPortal
 	// WebSocket and updates position prices accordingly.
@@ -247,10 +382,16 @@ func main() {
 			case <-ctx.Done():
 				return
 			case trade := <-tradeCh:
-				// Increment pre-buy trade counter (even for zero mcap trades).
-				if v, ok := tradeCounters.Load(trade.Mint); ok {
-					atomic.AddInt64(v.(*int64), 1)
+				// Feed trade into pre-buy observer (even for zero mcap trades).
+				if v, ok := tradeObservers.Load(trade.Mint); ok {
+					v.(*flow.Observer).RecordTrade(trade.TxType, trade.SolAmount, trade.MarketCapSol)
 				}
+
+				// Track sell pressure for open positions (Phase 5B).
+				if trade.TxType == "sell" && trade.SolAmount >= 5.0 {
+					mon.RecordSellPressure(ctx, trade.Mint, trade.SolAmount)
+				}
+
 				if trade.MarketCapSol <= 0 {
 					continue
 				}
@@ -282,6 +423,9 @@ func main() {
 						"mcap_sol", mcapSol,
 						"multiplier", multiplier,
 					)
+
+					// Trade-feed-driven exit evaluation (Phase 5A).
+					mon.EvaluatePosition(ctx, pos.ID)
 				}
 			}
 		}
@@ -302,13 +446,6 @@ func main() {
 				solCB.Check(solEquity)
 				if solCB.IsHalted() {
 					log.Warn("solana circuit breaker HALTED")
-				}
-				if bnbCB != nil {
-					bnbEquity := calculateEquity(store, state.ChainBNB, bnbBalance)
-					bnbCB.Check(bnbEquity)
-					if bnbCB.IsHalted() {
-						log.Warn("bnb circuit breaker HALTED")
-					}
 				}
 			}
 		}
@@ -362,9 +499,6 @@ func main() {
 			case <-resetTicker.C:
 				store.ResetDailyPnL()
 				solCB.ResetPauseCycles()
-				if bnbCB != nil {
-					bnbCB.ResetPauseCycles()
-				}
 				log.Info("hourly PnL reset")
 			}
 		}
@@ -410,8 +544,61 @@ func main() {
 		}
 	}()
 
-	// Semaphore to bound concurrent buy goroutines.
-	workerSem := make(chan struct{}, cfg.MaxConcurrentBuys)
+	// Capital refresh + gas refueler (every 30s).
+	var refueler *gas.Refueler
+	if cfg.GasRefuelEnabled {
+		refueler = gas.NewRefueler(solClient, store, mon, gas.RefuelerConfig{
+			USDCMint:    cfg.USDCMint,
+			Threshold:   cfg.GasRefuelThreshold,
+			Amount:      cfg.GasRefuelAmount,
+			CooldownMin: cfg.GasRefuelCooldownMin,
+			Shadow:      !cfg.IsLive(),
+		}, log)
+		log.Info("gas refueler enabled",
+			"threshold", cfg.GasRefuelThreshold,
+			"amount", cfg.GasRefuelAmount,
+		)
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		capitalTicker := time.NewTicker(30 * time.Second)
+		defer capitalTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-capitalTicker.C:
+				// Refresh wallet balance and update dynamic position limits.
+				if bal, err := solClient.GetBalanceWithFallback(ctx); err == nil {
+					store.SetGasBalance(state.ChainSolana, bal)
+
+					if cfg.DynamicPositionLimits {
+						openValue := 0.0
+						for _, pos := range store.OpenPositions(state.ChainSolana) {
+							openValue += pos.Amount
+						}
+						available := bal - cfg.MinGasReserveSOL - openValue
+						sizer.UpdateCapital(state.ChainSolana, available)
+						log.Debug("capital refresh",
+							"chain", "solana",
+							"balance", bal,
+							"open_value", openValue,
+							"available", available,
+							"dynamic_max", sizer.DynamicMaxPerChain(state.ChainSolana),
+						)
+					}
+				}
+
+				// Gas refueler check.
+				if refueler != nil {
+					refueler.Check(ctx)
+				}
+			}
+		}
+	}()
+
 	// Duplicate token guard prevents processing the same token concurrently.
 	var pendingTokens sync.Map
 
@@ -443,7 +630,7 @@ func main() {
 					<-workerSem // release
 					pendingTokens.Delete(t.Address)
 				}()
-				processToken(ctx, t, tokenFilter, sizer, executors, store, notifier, rep, reportStore, solCB, bnbCB, pumpScanner, &tradeCounters, cfg, log)
+				processToken(ctx, t, tokenFilter, sizer, executors, store, notifier, rep, reportStore, solCB, pumpScanner, &tradeObservers, perfTracker, bundleDetector, reputationDB, botDB, delayedEntry, &creatorMap, cfg, log)
 			}(token)
 		}
 	}
@@ -460,58 +647,151 @@ func processToken(
 	rep *reporter.Reporter,
 	reportStore *reporter.ReportStore,
 	solCB *risk.CircuitBreaker,
-	bnbCB *risk.CircuitBreaker,
 	pumpScanner *scanner.PumpFunScanner,
-	tradeCounters *sync.Map,
+	tradeObservers *sync.Map,
+	perfTracker *risk.PerformanceTracker,
+	bundleDetector *filter.BundleDetector,
+	reputationDB *filter.ReputationDB,
+	botDB *flow.BotDB,
+	delayedEntry *flow.DelayedEntry, // nil if disabled
+	creatorMap *sync.Map, // tokenAddress -> creator for reputation tracking
 	cfg *config.Config,
 	log *slog.Logger,
 ) {
 	result := f.Evaluate(ctx, token)
+
+	// Apply creator reputation score modifier.
+	if token.Creator != "" {
+		modifier := reputationDB.ScoreModifier(token.Creator)
+		if modifier != 0 {
+			result.Score += modifier
+			tier := reputationDB.GetTier(token.Creator)
+			log.Debug("creator reputation applied",
+				"token", token.Symbol,
+				"creator", token.Creator,
+				"tier", tier,
+				"modifier", modifier,
+				"adjusted_score", result.Score,
+			)
+			// Re-check approval after score adjustment.
+			result.Approved = result.Score >= cfg.MinScoreThreshold
+		}
+	}
+
 	if !result.Approved {
 		return
 	}
 
-	// Volume-aware pre-buy check: observe trade activity before committing capital.
+	// Volume-aware pre-buy check with order flow analysis (Phase 1).
+	var obsResult flow.ObservationResult
 	if cfg.MinTradesBeforeBuy > 0 && token.Chain == state.ChainSolana {
-		var counter int64
-		tradeCounters.Store(token.Address, &counter)
+		observer := flow.NewObserver()
+		tradeObservers.Store(token.Address, observer)
 		pumpScanner.SubscribeToken(token.Address)
 
+		// Adjust observation duration based on creator reputation.
 		observeDuration := time.Duration(cfg.TradeObservationSecs) * time.Second
+		if token.Creator != "" {
+			mult := reputationDB.ObservationMultiplier(token.Creator)
+			observeDuration = time.Duration(float64(observeDuration) * mult)
+		}
+
 		select {
 		case <-time.After(observeDuration):
 		case <-ctx.Done():
-			tradeCounters.Delete(token.Address)
+			tradeObservers.Delete(token.Address)
 			pumpScanner.UnsubscribeToken(token.Address)
 			return
 		}
 
-		trades := atomic.LoadInt64(&counter)
-		tradeCounters.Delete(token.Address)
+		obsResult = observer.Result()
+		tradeObservers.Delete(token.Address)
 
-		if trades < int64(cfg.MinTradesBeforeBuy) {
+		// Basic volume check.
+		if obsResult.TradeCount < cfg.MinTradesBeforeBuy {
 			log.Debug("token failed volume check, skipping buy",
 				"token", token.Symbol,
-				"trades", trades,
+				"trades", obsResult.TradeCount,
 				"required", cfg.MinTradesBeforeBuy,
 			)
 			pumpScanner.UnsubscribeToken(token.Address)
 			return
 		}
-		log.Debug("token passed volume check",
+
+		// Order flow imbalance check (Phase 1A).
+		if cfg.MinOFIThreshold > 0 && obsResult.OFI < cfg.MinOFIThreshold {
+			log.Debug("token failed OFI check, skipping buy",
+				"token", token.Symbol,
+				"ofi", obsResult.OFI,
+				"required", cfg.MinOFIThreshold,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// Price velocity check (Phase 1B).
+		if cfg.MaxObservationGrowthPct > 0 && obsResult.GrowthRate*100 > cfg.MaxObservationGrowthPct {
+			log.Debug("token growth too fast (pump-and-dump), skipping",
+				"token", token.Symbol,
+				"growth_pct", obsResult.GrowthRate*100,
+				"max", cfg.MaxObservationGrowthPct,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// Anti-bot detection (Phase 1C).
+		if cfg.MinTradeTimingCV > 0 && obsResult.IsBotLike {
+			log.Debug("token has bot-like trade pattern, skipping",
+				"token", token.Symbol,
+				"timing_cv", obsResult.TimingCV,
+				"threshold", cfg.MinTradeTimingCV,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// Bundle detection: check if creator is among early buyers (Phase 3A).
+		if token.Creator != "" && obsResult.BotBuyCount > 0 {
+			// Build early buyer list from bot buy addresses. For now, use creator match
+			// check — the observation window captures trade events, not individual addresses.
+			// In a full implementation, Observer would track buyer addresses.
+			if bundleDetector.IsBundled(token.Creator, []string{}) {
+				log.Debug("token flagged as bundled launch, skipping",
+					"token", token.Symbol,
+					"creator", token.Creator,
+				)
+				pumpScanner.UnsubscribeToken(token.Address)
+				return
+			}
+		}
+
+		// Bot dump delayed entry (Phase 3D): if bots are detected, delay buy.
+		if delayedEntry != nil && obsResult.SuggestDelay {
+			if delayedEntry.Schedule(token.Address, token) {
+				log.Info("bot activity detected, scheduling delayed re-entry",
+					"token", token.Symbol,
+					"bot_buys", obsResult.BotBuyCount,
+					"round_amounts", obsResult.RoundAmountCount,
+					"delay_sec", cfg.BotDumpDelaySec,
+				)
+			}
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		log.Debug("token passed observation checks",
 			"token", token.Symbol,
-			"trades", trades,
+			"trades", obsResult.TradeCount,
+			"ofi", obsResult.OFI,
+			"growth_pct", obsResult.GrowthRate*100,
+			"timing_cv", obsResult.TimingCV,
+			"bot_buys", obsResult.BotBuyCount,
+			"bot_sniped", obsResult.BotSniped,
 		)
 	}
 
-	var cb *risk.CircuitBreaker
-	switch token.Chain {
-	case state.ChainSolana:
-		cb = solCB
-	case state.ChainBNB:
-		cb = bnbCB
-	}
-	if cb == nil || !cb.CanSnipe() {
+	if !solCB.CanSnipe() {
 		log.Debug("snipe blocked by circuit breaker", "chain", token.Chain, "token", token.Symbol)
 		if token.Chain == state.ChainSolana {
 			pumpScanner.UnsubscribeToken(token.Address)
@@ -519,7 +799,7 @@ func processToken(
 		return
 	}
 
-	if !store.TryReserveSlot(token.Chain, cfg.MaxPositionsPerChain, cfg.MaxPositionsTotal) {
+	if !store.TryReserveSlot(token.Chain, sizer.DynamicMaxPerChain(token.Chain), sizer.DynamicMaxTotal()) {
 		log.Debug("position limit reached", "chain", token.Chain)
 		if token.Chain == state.ChainSolana {
 			pumpScanner.UnsubscribeToken(token.Address)
@@ -546,6 +826,14 @@ func processToken(
 		return
 	}
 
+	// Extract mcap for dynamic slippage.
+	mcapSOL := 0.0
+	if v, ok := token.Metadata["marketCapSol"]; ok {
+		if mc, ok := v.(float64); ok {
+			mcapSOL = mc
+		}
+	}
+
 	shadow := !cfg.IsLive()
 	buyResult := exec.Buy(ctx, executor.BuyParams{
 		Chain:        token.Chain,
@@ -553,36 +841,43 @@ func processToken(
 		TokenSymbol:  token.Symbol,
 		Amount:       size,
 		Shadow:       shadow,
+		Score:        result.Score,
+		McapSOL:      mcapSOL,
 	})
 
 	if buyResult.Error != nil {
-		cb.RecordError()
+		solCB.RecordError()
 		store.ReleaseSlot(token.Chain)
-		if token.Chain == state.ChainSolana {
-			pumpScanner.UnsubscribeToken(token.Address)
-		}
+		pumpScanner.UnsubscribeToken(token.Address)
 		return
 	}
 
-	cb.RecordSnipe()
+	solCB.RecordSnipe()
 
 	// Deduct buy gas.
 	store.DeductGas(token.Chain, buyResult.GasCost)
 
 	posID := fmt.Sprintf("%s-%s-%d", token.Chain, executor.SafePrefix(token.Address, 8), time.Now().UnixMilli())
 	store.AddPosition(&state.Position{
-		ID:           posID,
-		Chain:        token.Chain,
-		TokenAddress: token.Address,
-		TokenSymbol:  token.Symbol,
-		EntryPrice:   buyResult.Price,
-		CurrentPrice: buyResult.Price,
-		PeakPrice:    buyResult.Price,
-		Amount:       buyResult.Amount,
-		TokenBalance: buyResult.TokenAmount,
+		ID:            posID,
+		Chain:         token.Chain,
+		TokenAddress:  token.Address,
+		TokenSymbol:   token.Symbol,
+		EntryPrice:    buyResult.Price,
+		CurrentPrice:  buyResult.Price,
+		PeakPrice:     buyResult.Price,
+		Amount:        buyResult.Amount,
+		TokenBalance:  buyResult.TokenAmount,
 		EntryTime:     time.Now(),
 		LastTradeTime: time.Now(),
 		EntryGasCost:  buyResult.GasCost,
+		FilterScore:   result.Score,
+		SignalScores:  result.SignalBreakdown,
+		OFI:           obsResult.OFI,
+		ObsGrowthRate: obsResult.GrowthRate,
+		ObsTimingCV:   obsResult.TimingCV,
+		EntryHeat:     solCB.Heat(),
+		BotBuyCount:   obsResult.BotBuyCount,
 	})
 	store.ConsumeSlot(token.Chain)
 
@@ -614,7 +909,10 @@ func processToken(
 		CreatedAt:    now,
 	})
 
-	// Store creator for future lookups.
+	// Store creator for reputation tracking + future lookups.
+	if token.Creator != "" {
+		creatorMap.Store(token.Address, token.Creator)
+	}
 	if reportStore != nil && token.Creator != "" {
 		if err := reportStore.UpsertTokenCreator(ctx, token.Address, token.Creator); err != nil {
 			log.Warn("failed to upsert token creator", "err", err)
@@ -631,6 +929,23 @@ func processToken(
 	// Run honeypot check asynchronously after the buy. If the token is flagged,
 	// the position will be force-closed without blocking the pipeline.
 	go f.CheckHoneypotAsync(ctx, token.Chain, token.Address, posID, store, notifier, log)
+}
+
+// heliusHolderAdapter wraps the Solana client to implement filter.HolderChecker.
+type heliusHolderAdapter struct {
+	client *solanaclient.Client
+}
+
+func (a *heliusHolderAdapter) GetTokenHolders(ctx context.Context, mint string) (filter.HolderDistribution, error) {
+	dist, err := a.client.GetTokenHolders(ctx, mint)
+	if err != nil {
+		return filter.HolderDistribution{}, err
+	}
+	return filter.HolderDistribution{
+		TotalHolders:  dist.TotalHolders,
+		TopHolderPct:  dist.TopHolderPct,
+		Top5HolderPct: dist.Top5HolderPct,
+	}, nil
 }
 
 // calculateEquity computes the current equity for a chain based on open positions.

@@ -1,12 +1,12 @@
 # trenchbot
 
-Automated memecoin sniper for Solana (PumpFun) and BNB Chain (Four.meme). Runs in shadow mode by default — logs trades without executing on-chain.
+Automated memecoin sniper for Solana (PumpFun). Runs in shadow mode by default — logs trades without executing on-chain.
 
 ## Strategy
 
 ### Entry
 
-New tokens are discovered in real-time via websocket (PumpFun) and GraphQL subscription (Bitquery for Four.meme). Each token is scored on a 100-point scale across four dimensions:
+New tokens are discovered in real-time via websocket (PumpFun). Each token is scored on a 100-point scale across four dimensions:
 
 | Dimension | What it checks | Max |
 |---|---|---|
@@ -19,7 +19,7 @@ Tokens scoring below 60 are rejected. This filters out ~65% of tokens (most nake
 
 ### Position Sizing
 
-Base size: 0.3 SOL (Solana) / 0.05 BNB (BNB Chain), scaled by score:
+Base size: 0.3 SOL, scaled by score:
 
 - Score 60 → 0.75x base
 - Score 80 → 1.0x base
@@ -43,13 +43,13 @@ This means the worst case on any single position is a 50% loss on the position s
 
 - **Max 5 positions per chain, 8 total** — prevents overexposure
 - **Circuit breaker** — pauses for 1 hour after 10 consecutive losses, halts permanently at 50% drawdown from peak equity
-- **Rate limiting** — max 10 snipes per hour per chain
+- **Rate limiting** — max 10 snipes per hour
 - **Gas tracking** — separate gas balance from trading equity, refuses to trade when gas runs low
 - **Gas-adjusted P&L** — all reported P&L includes entry + exit gas costs
 
 ### Gas Budget
 
-Gas is tracked as a separate balance from trading equity (default 0.25 SOL / 0.08 BNB, ~$50 each). Every buy and sell deducts the per-transaction gas cost. When gas drops below the reserve threshold, the bot stops opening new positions.
+Gas is tracked as a separate balance from trading equity (default 0.25 SOL, ~$50). Every buy and sell deducts the per-transaction gas cost. When gas drops below the reserve threshold, the bot stops opening new positions.
 
 ## Architecture
 
@@ -59,10 +59,10 @@ cmd/watcher/    → GeckoTerminal → PostgreSQL data collector
 cmd/backtest/   → replay historical data through the pipeline
 
 internal/
-  scanner/      → websocket/GraphQL token discovery
+  scanner/      → websocket token discovery (PumpFun)
   filter/       → 100-point scoring system
   risk/         → position sizer + circuit breaker
-  executor/     → PumpFun (Solana) + Four.meme (BNB) trade execution
+  executor/     → PumpFun (Solana) trade execution
   monitor/      → exit strategy engine (tranches, stops, stale)
   state/        → in-memory position/trade/gas tracking
   simulation/   → synthetic token generator + replay engine

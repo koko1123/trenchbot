@@ -35,6 +35,24 @@ type Position struct {
 	SellFailures  int       // consecutive sell failures
 	EntryPriceUSD float64   // USD price at entry (set on first price lookup)
 	LastTradeTime time.Time // last trade event received from price feed
+
+	// Signal attribution: tracks which signals approved this trade.
+	FilterScore     int            `json:"filter_score,omitempty"`
+	SignalScores    map[string]int `json:"signal_scores,omitempty"` // signal_name -> points awarded
+	OFI             float64        `json:"ofi,omitempty"`           // order flow imbalance at entry
+	HolderTopPct    float64        `json:"holder_top_pct,omitempty"`
+	ObsGrowthRate   float64        `json:"obs_growth_rate,omitempty"`
+	ObsTimingCV     float64        `json:"obs_timing_cv,omitempty"`
+	EntryHeat       float64        `json:"entry_heat,omitempty"`    // heat level at time of buy (0.0-1.0)
+	BotBuyCount     int            `json:"bot_buy_count,omitempty"` // bot buys detected during observation
+
+	// Outcome attribution: set when position closes.
+	ExitReason   string        `json:"exit_reason,omitempty"`
+	HoldDuration time.Duration `json:"hold_duration,omitempty"`
+
+	// Sell pressure tracking (Phase 5B).
+	RecentLargeSells int       `json:"-"` // large sells in last 30s (not persisted)
+	LastLargeSellAt  time.Time `json:"-"`
 }
 
 type Trade struct {

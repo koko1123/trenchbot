@@ -14,21 +14,9 @@ type Config struct {
 	SolanaPrivateKey   string  `envconfig:"SOLANA_PRIVATE_KEY"`
 	SolanaSnipeAmount  float64 `envconfig:"SOLANA_SNIPE_AMOUNT_SOL" default:"0.3"`
 
-	// BNB Chain
-	BNBRPCURL        string  `envconfig:"BNB_RPC_URL" default:"https://bsc-dataseed.binance.org"`
-	BNBPrivateKey    string  `envconfig:"BNB_PRIVATE_KEY"`
-	BNBSnipeAmount   float64 `envconfig:"BNB_SNIPE_AMOUNT_BNB" default:"0.05"`
-
 	// PumpPortal
 	PumpPortalWSURL    string `envconfig:"PUMPPORTAL_WS_URL" default:"wss://pumpportal.fun/api/data"`
 	PumpPortalTradeURL string `envconfig:"PUMPPORTAL_TRADE_URL" default:"https://pumpportal.fun/api/trade-local"`
-
-	// Four.meme
-	FourMemeProxyContract string `envconfig:"FOURMEME_PROXY_CONTRACT" default:"0x5c952063c7fc8610FFDB798152D69F0B9550762b"`
-
-	// Bitquery
-	BitqueryAPIKey string `envconfig:"BITQUERY_API_KEY"`
-	BitqueryAPIURL string `envconfig:"BITQUERY_API_URL" default:"https://streaming.bitquery.io/graphql"`
 
 	// Risk
 	MaxPositionsPerChain       int     `envconfig:"MAX_CONCURRENT_POSITIONS_PER_CHAIN" default:"10"`
@@ -40,11 +28,8 @@ type Config struct {
 
 	// Gas
 	GasBudgetSOL     float64 `envconfig:"GAS_BUDGET_SOL" default:"0.25"`
-	GasBudgetBNB     float64 `envconfig:"GAS_BUDGET_BNB" default:"0.08"`
 	GasCostPerTxSOL  float64 `envconfig:"GAS_COST_PER_TX_SOL" default:"0.000505"`
-	GasCostPerTxBNB  float64 `envconfig:"GAS_COST_PER_TX_BNB" default:"0.0003"`
 	MinGasReserveSOL float64 `envconfig:"MIN_GAS_RESERVE_SOL" default:"0.005"`
-	MinGasReserveBNB float64 `envconfig:"MIN_GAS_RESERVE_BNB" default:"0.002"`
 
 	// Filter
 	MinScoreThreshold    int  `envconfig:"MIN_SCORE_THRESHOLD" default:"55"`
@@ -52,11 +37,7 @@ type Config struct {
 
 	// Execution
 	SlippagePctSOL       int `envconfig:"SLIPPAGE_PCT_SOL" default:"25"`
-	SlippagePctBNB       int `envconfig:"SLIPPAGE_PCT_BNB" default:"25"`
 	MaxConcurrentBuys    int `envconfig:"MAX_CONCURRENT_BUYS" default:"10"`
-
-	// Bitquery polling
-	BitqueryPollIntervalSec int `envconfig:"BITQUERY_POLL_INTERVAL_SEC" default:"2"`
 
 	// Exit strategy
 	StopLossPct              float64 `envconfig:"STOP_LOSS_PCT" default:"30"`
@@ -67,6 +48,53 @@ type Config struct {
 	NoTradeMaxMult           float64 `envconfig:"NO_TRADE_MAX_MULT" default:"1.1"`
 	MinTradesBeforeBuy       int     `envconfig:"MIN_TRADES_BEFORE_BUY" default:"5"`
 	TradeObservationSecs     int     `envconfig:"TRADE_OBSERVATION_SECS" default:"5"`
+
+	// Order flow intelligence (Phase 1)
+	MinOFIThreshold          float64 `envconfig:"MIN_OFI_THRESHOLD" default:"0.3"`
+	MaxObservationGrowthPct  float64 `envconfig:"MAX_OBSERVATION_GROWTH_PCT" default:"500"`
+	MinObservationGrowthPct  float64 `envconfig:"MIN_OBSERVATION_GROWTH_PCT" default:"0"`
+	MinTradeTimingCV         float64 `envconfig:"MIN_TRADE_TIMING_CV" default:"0.3"`
+
+	// On-chain intelligence (Phase 2)
+	HeliusAPIKey             string  `envconfig:"HELIUS_API_KEY"`
+	HolderCheckEnabled       bool    `envconfig:"HOLDER_CHECK_ENABLED" default:"false"`
+	MaxTopHolderPct          float64 `envconfig:"MAX_TOP_HOLDER_PCT" default:"50"`
+	BundleDetectionEnabled   bool    `envconfig:"BUNDLE_DETECTION_ENABLED" default:"false"`
+
+	// Adaptive execution (Phase 3)
+	DynamicSlippageEnabled   bool    `envconfig:"DYNAMIC_SLIPPAGE_ENABLED" default:"false"`
+	SolanaRPCFallbackURLs    string  `envconfig:"SOLANA_RPC_FALLBACK_URLS"`
+
+	// Kelly criterion sizing (Phase 4)
+	KellyEnabled             bool    `envconfig:"KELLY_ENABLED" default:"false"`
+	KellyWindowSize          int     `envconfig:"KELLY_WINDOW_SIZE" default:"50"`
+
+	// Alpha monitoring (Phase 6)
+	AlphaMonitorEnabled      bool    `envconfig:"ALPHA_MONITOR_ENABLED" default:"false"`
+
+	// Dynamic position limits
+	DynamicPositionLimits    bool    `envconfig:"DYNAMIC_POSITION_LIMITS" default:"false"`
+	PositionScaleFactor      float64 `envconfig:"POSITION_SCALE_FACTOR" default:"3.0"`
+
+	// Auto gas refueling
+	GasRefuelEnabled         bool    `envconfig:"GAS_REFUEL_ENABLED" default:"false"`
+	GasRefuelThreshold       float64 `envconfig:"GAS_REFUEL_THRESHOLD" default:"0.0015"`
+	GasRefuelAmount          float64 `envconfig:"GAS_REFUEL_AMOUNT" default:"0.05"`
+	GasRefuelCooldownMin     int     `envconfig:"GAS_REFUEL_COOLDOWN_MIN" default:"5"`
+	USDCMint                 string  `envconfig:"USDC_MINT" default:"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"`
+
+	// Bot dump exploitation (Phase 3D)
+	BotDumpDelayEnabled bool `envconfig:"BOT_DUMP_DELAY_ENABLED" default:"false"`
+	BotDumpDelaySec     int  `envconfig:"BOT_DUMP_DELAY_SEC" default:"90"`
+
+	// Jito bundle submission (Phase 2A)
+	JitoEnabled        bool   `envconfig:"JITO_ENABLED" default:"false"`
+	JitoBlockEngineURL string `envconfig:"JITO_BLOCK_ENGINE_URL" default:"https://mainnet.block-engine.jito.wtf"`
+	JitoTipLamports    uint64 `envconfig:"JITO_TIP_LAMPORTS" default:"10000"`
+
+	// Wallet rotation (Phase 2B)
+	WalletRotationEnabled bool   `envconfig:"WALLET_ROTATION_ENABLED" default:"false"`
+	SolanaPrivateKeys     string `envconfig:"SOLANA_PRIVATE_KEYS"` // comma-separated (first is primary)
 
 	// State persistence
 	StateSnapshotPath string `envconfig:"STATE_SNAPSHOT_PATH" default:"state.json"`
@@ -98,8 +126,8 @@ func (c *Config) validate() error {
 		return fmt.Errorf("MODE must be 'shadow' or 'live', got %q", c.Mode)
 	}
 	if c.IsLive() {
-		if c.SolanaPrivateKey == "" && c.BNBPrivateKey == "" {
-			return fmt.Errorf("live mode requires at least one private key")
+		if c.SolanaPrivateKey == "" {
+			return fmt.Errorf("live mode requires SOLANA_PRIVATE_KEY")
 		}
 	}
 
@@ -118,17 +146,14 @@ func (c *Config) validate() error {
 	if c.ConsecutiveLossPauseThresh <= 0 {
 		return fmt.Errorf("CONSECUTIVE_LOSS_PAUSE_THRESHOLD must be > 0, got %d", c.ConsecutiveLossPauseThresh)
 	}
-	if c.SolanaSnipeAmount <= 0 && c.BNBSnipeAmount <= 0 {
-		return fmt.Errorf("at least one of SOLANA_SNIPE_AMOUNT_SOL or BNB_SNIPE_AMOUNT_BNB must be > 0")
+	if c.SolanaSnipeAmount <= 0 {
+		return fmt.Errorf("SOLANA_SNIPE_AMOUNT_SOL must be > 0")
 	}
 	if c.MinScoreThreshold < 0 || c.MinScoreThreshold > 100 {
 		return fmt.Errorf("MIN_SCORE_THRESHOLD must be in [0, 100], got %d", c.MinScoreThreshold)
 	}
 	if c.GasBudgetSOL > 0 && c.MinGasReserveSOL > 0 && c.GasBudgetSOL < c.MinGasReserveSOL {
 		return fmt.Errorf("GAS_BUDGET_SOL (%g) must be >= MIN_GAS_RESERVE_SOL (%g)", c.GasBudgetSOL, c.MinGasReserveSOL)
-	}
-	if c.GasBudgetBNB > 0 && c.MinGasReserveBNB > 0 && c.GasBudgetBNB < c.MinGasReserveBNB {
-		return fmt.Errorf("GAS_BUDGET_BNB (%g) must be >= MIN_GAS_RESERVE_BNB (%g)", c.GasBudgetBNB, c.MinGasReserveBNB)
 	}
 
 	return nil

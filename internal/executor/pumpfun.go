@@ -11,17 +11,24 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/cindocode/trenchbot/internal/jito"
 	"github.com/cindocode/trenchbot/internal/state"
+	"github.com/cindocode/trenchbot/internal/wallet"
 	solanaclient "github.com/cindocode/trenchbot/pkg/solana"
 )
 
 type PumpFunExecutor struct {
-	tradeURL       string
-	jupiterBaseURL string
-	client         *solanaclient.Client
-	http           *http.Client
-	slippage       int
-	log            *slog.Logger
+	tradeURL          string
+	jupiterBaseURL    string
+	client            *solanaclient.Client
+	http              *http.Client
+	slippage          int
+	dynamicSlippage   bool
+	log               *slog.Logger
+	heatFn            func() float64
+	feeEstimateFn     func(ctx context.Context) (solanaclient.PriorityFeeEstimate, error)
+	jito              *jito.Client   // optional, nil if Jito disabled
+	walletPool        *wallet.Pool   // optional, nil if rotation disabled
 }
 
 func NewPumpFunExecutor(tradeURL string, solClient *solanaclient.Client, slippage int, log *slog.Logger) *PumpFunExecutor {
@@ -35,6 +42,89 @@ func NewPumpFunExecutor(tradeURL string, solClient *solanaclient.Client, slippag
 		http:           &http.Client{Timeout: 30 * time.Second},
 		slippage:       slippage,
 		log:            log,
+	}
+}
+
+// SetDynamicSlippage enables market-cap-aware slippage calculation.
+func (e *PumpFunExecutor) SetDynamicSlippage(enabled bool, heatFn func() float64) {
+	e.dynamicSlippage = enabled
+	e.heatFn = heatFn
+}
+
+// SetFeeEstimator sets the Helius priority fee estimate function.
+func (e *PumpFunExecutor) SetFeeEstimator(fn func(ctx context.Context) (solanaclient.PriorityFeeEstimate, error)) {
+	e.feeEstimateFn = fn
+}
+
+// SetJitoClient sets an optional Jito block engine client for bundle submission.
+func (e *PumpFunExecutor) SetJitoClient(j *jito.Client) {
+	e.jito = j
+}
+
+// SetWalletPool sets an optional wallet pool for wallet rotation.
+func (e *PumpFunExecutor) SetWalletPool(wp *wallet.Pool) {
+	e.walletPool = wp
+}
+
+// computeSlippage returns the appropriate slippage for a trade.
+func (e *PumpFunExecutor) computeSlippage(mcapSOL float64) int {
+	if !e.dynamicSlippage {
+		return e.slippage
+	}
+
+	base := 15
+	if mcapSOL > 100 {
+		base = 8
+	} else if mcapSOL > 50 {
+		base = 12
+	} else if mcapSOL < 10 {
+		base = 30
+	}
+
+	if e.heatFn != nil {
+		heat := e.heatFn()
+		base += int(heat * 10)
+	}
+
+	if base > 49 {
+		base = 49
+	}
+	return base
+}
+
+// computePriorityFee returns the appropriate priority fee based on urgency.
+func (e *PumpFunExecutor) computePriorityFee(ctx context.Context, urgency SellUrgency, score int) float64 {
+	if e.feeEstimateFn == nil {
+		// Fallback: static fees scaled by urgency.
+		switch urgency {
+		case UrgencyCritical:
+			return 0.002
+		case UrgencyHigh:
+			return 0.001
+		default:
+			if score > 80 {
+				return 0.001
+			}
+			return 0.0005
+		}
+	}
+
+	fees, err := e.feeEstimateFn(ctx)
+	if err != nil {
+		e.log.Debug("fee estimate failed, using defaults", "err", err)
+		return 0.0005
+	}
+
+	switch urgency {
+	case UrgencyCritical:
+		return fees.VeryHigh
+	case UrgencyHigh:
+		return fees.High
+	default:
+		if score > 80 {
+			return fees.High
+		}
+		return fees.Medium
 	}
 }
 
@@ -90,14 +180,23 @@ func (e *PumpFunExecutor) Buy(ctx context.Context, params BuyParams) BuyResult {
 		}
 	}
 
+	if e.jito != nil {
+		// TODO: Build local tx + submit via Jito bundle instead of PumpPortal.
+		// For now, fall back to PumpPortal API.
+		e.log.Debug("jito available but using pumpportal fallback", "token", params.TokenAddress)
+	}
+
+	slippage := e.computeSlippage(params.McapSOL)
+	priorityFee := e.computePriorityFee(ctx, UrgencyNormal, params.Score)
+
 	req := pumpTradeRequest{
 		PublicKey:        e.client.PublicKey(),
 		Action:           "buy",
 		Mint:             params.TokenAddress,
 		Amount:           params.Amount,
 		DenominatedInSol: "true",
-		Slippage:         e.slippage,
-		PriorityFee:      0.0005,
+		Slippage:         slippage,
+		PriorityFee:      priorityFee,
 		Pool:             "auto",
 	}
 
@@ -162,6 +261,8 @@ func (e *PumpFunExecutor) Sell(ctx context.Context, params SellParams) SellResul
 		slippage = params.MaxSlippage
 	}
 
+	priorityFee := e.computePriorityFee(ctx, params.Urgency, 0)
+
 	req := pumpTradeRequest{
 		PublicKey:        e.client.PublicKey(),
 		Action:           "sell",
@@ -169,7 +270,7 @@ func (e *PumpFunExecutor) Sell(ctx context.Context, params SellParams) SellResul
 		Amount:           tokenAmount,
 		DenominatedInSol: "false",
 		Slippage:         slippage,
-		PriorityFee:      0.0005,
+		PriorityFee:      priorityFee,
 		Pool:             "auto",
 	}
 

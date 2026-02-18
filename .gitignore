@@ -21,5 +21,12 @@ Thumbs.db
 # logs
 *.log
 
+# state
+state.json
+state.json.bak
+
+# simulation outputs
+*-report.json
+
 # go
 vendor/

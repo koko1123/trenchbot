@@ -12,6 +12,8 @@ type BuyParams struct {
 	TokenSymbol  string
 	Amount       float64 // native token amount (SOL or BNB)
 	Shadow       bool
+	Score        int     // filter score (for priority fee scaling)
+	McapSOL      float64 // market cap in SOL (for dynamic slippage)
 }
 
 type SellParams struct {
@@ -22,7 +24,17 @@ type SellParams struct {
 	TokenBalance float64 // total token balance held (raw token count)
 	MaxSlippage  int     // override slippage for desperate sells (0 = use default)
 	Shadow       bool
+	Urgency      SellUrgency // priority fee urgency level
 }
+
+// SellUrgency indicates how urgently a sell needs to land.
+type SellUrgency int
+
+const (
+	UrgencyNormal SellUrgency = iota
+	UrgencyHigh               // exits above 3x
+	UrgencyCritical           // stop-loss exits
+)
 
 type BuyResult struct {
 	Success     bool

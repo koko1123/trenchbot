@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -59,6 +60,7 @@ type Monitor struct {
 	log             *slog.Logger
 	shadow          bool
 	circuitBreakers map[state.Chain]*risk.CircuitBreaker
+	perfTracker     *risk.PerformanceTracker
 	onPositionClose func(chain state.Chain, tokenAddress string)
 }
 
@@ -76,6 +78,10 @@ func New(store *state.Store, executors map[state.Chain]executor.Executor, notifi
 
 func (m *Monitor) SetCircuitBreakers(cbs map[state.Chain]*risk.CircuitBreaker) {
 	m.circuitBreakers = cbs
+}
+
+func (m *Monitor) SetPerformanceTracker(pt *risk.PerformanceTracker) {
+	m.perfTracker = pt
 }
 
 func (m *Monitor) SetOnPositionClose(fn func(chain state.Chain, tokenAddress string)) {
@@ -100,6 +106,50 @@ func (m *Monitor) CheckPositions(ctx context.Context) {
 	positions := m.store.AllOpenPositions()
 	for _, pos := range positions {
 		m.evaluateExit(ctx, pos)
+	}
+}
+
+// EvaluatePosition triggers an immediate exit evaluation for a specific position.
+// Called from the trade feed handler for real-time exit response (Phase 5A).
+func (m *Monitor) EvaluatePosition(ctx context.Context, posID string) {
+	pos, ok := m.store.GetPosition(posID)
+	if !ok || pos.Closed {
+		return
+	}
+	m.evaluateExit(ctx, pos)
+}
+
+// RecordSellPressure tracks large sell events for a position (Phase 5B).
+// If 3+ large sells arrive within 30 seconds, triggers early exit.
+func (m *Monitor) RecordSellPressure(ctx context.Context, tokenAddress string, solAmount float64) {
+	if solAmount < 5.0 { // only track large sells (>5 SOL)
+		return
+	}
+
+	now := m.clock.Now()
+	positions := m.store.AllOpenPositions()
+	for _, pos := range positions {
+		if pos.TokenAddress != tokenAddress {
+			continue
+		}
+		m.store.UpdatePosition(pos.ID, func(p *state.Position) {
+			// Reset counter if last large sell was >30s ago.
+			if !p.LastLargeSellAt.IsZero() && now.Sub(p.LastLargeSellAt) > 30*time.Second {
+				p.RecentLargeSells = 0
+			}
+			p.RecentLargeSells++
+			p.LastLargeSellAt = now
+		})
+
+		// Re-read after update.
+		updated, ok := m.store.GetPosition(pos.ID)
+		if ok && updated.RecentLargeSells >= 3 {
+			m.log.Warn("sell pressure exit triggered",
+				"token", pos.TokenSymbol,
+				"large_sells", updated.RecentLargeSells,
+			)
+			m.executeSell(ctx, updated, 100-updated.SoldPct, "sell-pressure")
+		}
 	}
 }
 
@@ -204,6 +254,13 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 		return
 	}
 
+	urgency := executor.UrgencyNormal
+	if reason == "stop-loss" || reason == "sell-pressure" {
+		urgency = executor.UrgencyCritical
+	} else if reason == "trailing-stop" || reason == "early-trailing-stop" {
+		urgency = executor.UrgencyHigh
+	}
+
 	result := exec.Sell(ctx, executor.SellParams{
 		Chain:        pos.Chain,
 		TokenAddress: pos.TokenAddress,
@@ -211,6 +268,7 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 		AmountPct:    sellPct,
 		TokenBalance: pos.TokenBalance,
 		Shadow:       m.shadow,
+		Urgency:      urgency,
 	})
 
 	if result.Error != nil {
@@ -251,6 +309,8 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 					p.TokenBalance = 0
 					p.SellFailures = 0
 					p.PnL = -90.0 // assume near-total loss at max slippage
+					p.ExitReason = "max-slippage-sell"
+					p.HoldDuration = m.clock.Since(p.EntryTime)
 				})
 				m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pos.TokenAddress, -90.0, "max-slippage-sell")
 				m.firePositionClose(pos.Chain, pos.TokenAddress)
@@ -264,6 +324,8 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 			m.store.UpdatePosition(pos.ID, func(p *state.Position) {
 				p.Closed = true
 				p.PnL = -100.0
+				p.ExitReason = "force-close-honeypot"
+				p.HoldDuration = m.clock.Since(p.EntryTime)
 			})
 			m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pos.TokenAddress, -100.0, "force-close-honeypot")
 			m.firePositionClose(pos.Chain, pos.TokenAddress)
@@ -320,6 +382,8 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 			p.Closed = true
 			p.TokenBalance = 0
 			p.PnL = pnlPct
+			p.ExitReason = reason
+			p.HoldDuration = m.clock.Since(p.EntryTime)
 		}
 	})
 
@@ -336,8 +400,59 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 	m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pos.TokenAddress, pnlPct, reason)
 
 	if pos.SoldPct+sellPct >= 100 {
+		// Record outcome for performance tracking and self-assessment.
+		if m.perfTracker != nil {
+			m.perfTracker.Record(risk.TradeOutcome{
+				PnLPct:     pnlPct,
+				Score:      pos.FilterScore,
+				ExitReason: reason,
+				OFI:        pos.OFI,
+				EntryHeat:  pos.EntryHeat,
+				Signals:    pos.SignalScores,
+			})
+		}
 		m.firePositionClose(pos.Chain, pos.TokenAddress)
 	}
+}
+
+// ForceExitPosition force-sells an entire position by ID. Used by the gas
+// refueler to liquidate the worst-performing position when gas is critical.
+func (m *Monitor) ForceExitPosition(ctx context.Context, posID string, reason string) error {
+	pos, ok := m.store.GetPosition(posID)
+	if !ok {
+		return fmt.Errorf("position %s not found", posID)
+	}
+	if pos.Closed {
+		return fmt.Errorf("position %s already closed", posID)
+	}
+	remaining := 100 - pos.SoldPct
+	if remaining <= 0 {
+		return nil
+	}
+	m.executeSell(ctx, pos, remaining, reason)
+	return nil
+}
+
+// WorstPosition returns the open position with the lowest multiplier.
+// Returns nil if no open positions exist.
+func (m *Monitor) WorstPosition(chain state.Chain) *state.Position {
+	positions := m.store.OpenPositions(chain)
+	if len(positions) == 0 {
+		return nil
+	}
+	var worst *state.Position
+	worstMult := 999.0
+	for _, pos := range positions {
+		if pos.EntryPrice <= 0 {
+			continue
+		}
+		mult := pos.CurrentPrice / pos.EntryPrice
+		if mult < worstMult {
+			worstMult = mult
+			worst = pos
+		}
+	}
+	return worst
 }
 
 func (m *Monitor) firePositionClose(chain state.Chain, tokenAddress string) {

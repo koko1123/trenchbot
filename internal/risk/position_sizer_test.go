@@ -14,7 +14,7 @@ func almostEqual(a, b, epsilon float64) bool {
 
 func TestSize_BaseCase(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05)
+	ps := NewPositionSizer(store, 0.3)
 
 	// score=80 → multiplier=1.0
 	got := ps.Size(state.ChainSolana, 80)
@@ -25,7 +25,7 @@ func TestSize_BaseCase(t *testing.T) {
 
 func TestSize_LowScore(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05)
+	ps := NewPositionSizer(store, 0.3)
 
 	// score=60 → multiplier=60/80=0.75
 	got := ps.Size(state.ChainSolana, 60)
@@ -36,7 +36,7 @@ func TestSize_LowScore(t *testing.T) {
 
 func TestSize_MaxScore(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05)
+	ps := NewPositionSizer(store, 0.3)
 
 	// score=100 → multiplier=min(100/80, 1.25)=1.25
 	got := ps.Size(state.ChainSolana, 100)
@@ -53,7 +53,7 @@ func TestSize_MaxScore(t *testing.T) {
 
 func TestSize_HeatReduction(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05)
+	ps := NewPositionSizer(store, 0.3)
 
 	// No heat → full size
 	fullSize := ps.Size(state.ChainSolana, 80)
@@ -76,20 +76,10 @@ func TestSize_HeatReduction(t *testing.T) {
 	}
 }
 
-func TestSize_BNBChain(t *testing.T) {
-	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05)
-
-	got := ps.Size(state.ChainBNB, 80)
-	if !almostEqual(got, 0.05, 0.001) {
-		t.Errorf("got %f, want 0.05", got)
-	}
-}
-
 func TestSize_GasReserveBlock(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05)
-	ps.SetGasReserves(0.005, 0.002)
+	ps := NewPositionSizer(store, 0.3)
+	ps.SetGasReserve(0.005)
 
 	// No gas set — balance is 0, below reserve → should refuse to size.
 	got := ps.Size(state.ChainSolana, 80)
@@ -115,8 +105,8 @@ func TestSize_GasReserveBlock(t *testing.T) {
 func TestSize_ConcentrationScaling(t *testing.T) {
 	store := state.NewStore()
 	store.SetGasBalance(state.ChainSolana, 1.0)
-	ps := NewPositionSizer(store, 0.3, 0.05)
-	ps.SetGasReserves(0.005, 0.002)
+	ps := NewPositionSizer(store, 0.3)
+	ps.SetGasReserve(0.005)
 	ps.SetMaxPositions(5)
 
 	// 0 open positions → full size
@@ -146,7 +136,7 @@ func TestSize_ConcentrationScaling(t *testing.T) {
 
 func TestSize_UnknownChain(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05)
+	ps := NewPositionSizer(store, 0.3)
 
 	got := ps.Size("unknown", 80)
 	if got != 0 {

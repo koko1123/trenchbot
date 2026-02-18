@@ -16,11 +16,24 @@ type CreatorLookup interface {
 	CreatorHistory(ctx context.Context, creator string) (total int, rugCount int, err error)
 }
 
+// HolderChecker provides token holder distribution data.
+type HolderChecker interface {
+	GetTokenHolders(ctx context.Context, mint string) (HolderDistribution, error)
+}
+
+// HolderDistribution holds the analysis of a token's holder distribution.
+type HolderDistribution struct {
+	TotalHolders  int
+	TopHolderPct  float64
+	Top5HolderPct float64
+}
+
 type Result struct {
-	Token    scanner.NewToken
-	Score    int
-	Reasons  []string
-	Approved bool
+	Token           scanner.NewToken
+	Score           int
+	Reasons         []string
+	Approved        bool
+	SignalBreakdown map[string]int // per-dimension score: "metadata"->20, "creator"->15, etc.
 }
 
 type Filter struct {
@@ -30,6 +43,8 @@ type Filter struct {
 	log              *slog.Logger
 	creatorLookup    CreatorLookup
 	honeypotChecker  *HoneypotChecker
+	holderChecker    HolderChecker
+	maxTopHolderPct  float64 // max top holder percentage before penalty (default 50)
 }
 
 func New(minScore int, log *slog.Logger) *Filter {
@@ -56,6 +71,12 @@ func (f *Filter) SetHoneypotChecker(hc *HoneypotChecker) {
 	f.honeypotChecker = hc
 }
 
+// SetHolderChecker enables on-chain holder distribution checking.
+func (f *Filter) SetHolderChecker(hc HolderChecker, maxTopHolderPct float64) {
+	f.holderChecker = hc
+	f.maxTopHolderPct = maxTopHolderPct
+}
+
 func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
 	score := 0
 	var reasons []string
@@ -80,6 +101,15 @@ func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
 	score += chainScore
 	reasons = append(reasons, chainReasons...)
 
+	// On-chain holder distribution (-15 to +15 points)
+	holderScore := 0
+	if f.holderChecker != nil {
+		var holderReasons []string
+		holderScore, holderReasons = f.scoreHolders(ctx, token)
+		score += holderScore
+		reasons = append(reasons, holderReasons...)
+	}
+
 	effectiveMin := f.minScore
 	if f.heatFn != nil && f.maxMinScore > f.minScore {
 		heat := f.heatFn()
@@ -87,11 +117,22 @@ func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
 	}
 	approved := score >= effectiveMin
 
+	breakdown := map[string]int{
+		"metadata": metaScore,
+		"creator":  creatorScore,
+		"momentum": momentumScore,
+		"chain":    chainScore,
+	}
+	if f.holderChecker != nil {
+		breakdown["holders"] = holderScore
+	}
+
 	result := Result{
-		Token:    token,
-		Score:    score,
-		Reasons:  reasons,
-		Approved: approved,
+		Token:           token,
+		Score:           score,
+		Reasons:         reasons,
+		Approved:        approved,
+		SignalBreakdown: breakdown,
 	}
 
 	f.log.Debug("token scored",
@@ -216,6 +257,37 @@ func (f *Filter) scoreMomentum(token scanner.NewToken) (int, []string) {
 				reasons = append(reasons, "initial buy > 1.0 SOL (+5)")
 			}
 		}
+	}
+
+	return score, reasons
+}
+
+func (f *Filter) scoreHolders(ctx context.Context, token scanner.NewToken) (int, []string) {
+	score := 0
+	var reasons []string
+
+	dist, err := f.holderChecker.GetTokenHolders(ctx, token.Address)
+	if err != nil {
+		f.log.Debug("holder check failed (skipping)", "token", token.Address, "err", err)
+		return 0, nil
+	}
+
+	maxPct := f.maxTopHolderPct
+	if maxPct <= 0 {
+		maxPct = 50
+	}
+
+	if dist.TopHolderPct > maxPct {
+		score -= 15
+		reasons = append(reasons, fmt.Sprintf("top holder %.0f%% > %.0f%% (-15)", dist.TopHolderPct, maxPct))
+	} else if dist.TopHolderPct < 30 {
+		score += 10
+		reasons = append(reasons, fmt.Sprintf("distributed: top holder %.0f%% (+10)", dist.TopHolderPct))
+	}
+
+	if dist.TotalHolders >= 10 {
+		score += 5
+		reasons = append(reasons, fmt.Sprintf("%d holders (+5)", dist.TotalHolders))
 	}
 
 	return score, reasons

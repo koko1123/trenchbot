@@ -333,10 +333,10 @@ func NewEngine(cfg SimConfig, log *slog.Logger) *Engine {
 		StartingEquity:     cfg.StartingEquity,
 	}, store, clk, log)
 
-	sizer := risk.NewPositionSizer(store, 0.3, 0.05)
+	sizer := risk.NewPositionSizer(store, 0.3)
 	sizer.SetMaxPositions(5)
 	// Reserve enough gas for ~10 round-trips before refusing to size.
-	sizer.SetGasReserves(cfg.GasCostPerTx*10, 0)
+	sizer.SetGasReserve(cfg.GasCostPerTx * 10)
 	filt := filter.New(cfg.MinScore, log)
 	mon := monitor.New(store, executors, notifier, monitor.DefaultExitConfig(), clk, true, log)
 
@@ -646,6 +646,8 @@ func (e *Engine) processToken(ctx context.Context, st SyntheticToken) {
 		Amount:       size,
 		EntryTime:    e.clk.Now(),
 		EntryGasCost: buyResult.GasCost,
+		FilterScore:  result.Score,
+		SignalScores: result.SignalBreakdown,
 	})
 }
 
