@@ -148,16 +148,16 @@ func TestDailyLossLimitPause(t *testing.T) {
 		t.Error("should be paused after daily loss limit hit")
 	}
 
-	// Advance to just before midnight — still paused
-	clk.Advance(9*time.Hour + 59*time.Minute)
+	// Advance to just before 1 hour — still paused
+	clk.Advance(59 * time.Minute)
 	if cb.CanSnipe() {
-		t.Error("should still be paused before midnight")
+		t.Error("should still be paused before 1 hour")
 	}
 
-	// Advance past midnight
+	// Advance past 1 hour
 	clk.Advance(2 * time.Minute)
 	if !cb.CanSnipe() {
-		t.Error("should be unpaused after midnight")
+		t.Error("should be unpaused after 1 hour")
 	}
 }
 

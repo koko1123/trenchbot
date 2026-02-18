@@ -155,19 +155,18 @@ func (cb *CircuitBreaker) Check(currentEquity float64) {
 		)
 	}
 
-	// Daily loss limit: pause until next midnight UTC
+	// Loss limit: pause until next PnL reset (hourly).
 	if cb.dailyLossLimitPct > 0 && cb.startingEquity > 0 {
 		dailyPnL := cb.store.GetDailyPnL(cb.chain)
 		if dailyPnL < 0 {
 			dailyLossPct := (-dailyPnL / cb.startingEquity) * 100
 			if dailyLossPct >= cb.dailyLossLimitPct && cb.clock.Now().After(cb.dailyPausedUntil) {
-				now := cb.clock.Now().UTC()
-				nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
-				cb.dailyPausedUntil = nextMidnight
-				cb.log.Warn("circuit breaker: daily loss limit pause",
+				pauseUntil := cb.clock.Now().Add(1 * time.Hour)
+				cb.dailyPausedUntil = pauseUntil
+				cb.log.Warn("circuit breaker: loss limit pause",
 					"chain", cb.chain,
-					"daily_loss_pct", dailyLossPct,
-					"paused_until", nextMidnight,
+					"loss_pct", dailyLossPct,
+					"paused_until", pauseUntil,
 				)
 			}
 		}
@@ -204,11 +203,13 @@ func (cb *CircuitBreaker) ConsecutiveLosses() int {
 	return cb.consecutiveLosses
 }
 
-// ResetPauseCycles resets the escalating pause cycle counter (called at daily reset).
+// ResetPauseCycles resets the escalating pause cycle counter and clears the
+// daily loss pause so the bot can resume trading after a PnL reset.
 func (cb *CircuitBreaker) ResetPauseCycles() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.consecutivePauseCycles = 0
+	cb.dailyPausedUntil = time.Time{}
 }
 
 func (cb *CircuitBreaker) hourlyLimitReached() bool {
