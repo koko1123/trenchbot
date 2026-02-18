@@ -96,7 +96,7 @@ func TestPipeline_TokenFlowsThrough(t *testing.T) {
 		Chain: state.ChainSolana, MaxDrawdownPct: 50, ConsecutiveLossCap: 10,
 		MaxSnipesPerHour: 10, StartingEquity: 1200,
 	}, store, clk, testLog)
-	sizer := risk.NewPositionSizer(store, 0.3, 0.05, 8)
+	sizer := risk.NewPositionSizer(store, 0.3, 0.05)
 	sizer.SetGasReserves(0.005, 0.002)
 	_ = monitor.New(store, executors, notif, monitor.DefaultExitConfig(), clk, true, testLog)
 

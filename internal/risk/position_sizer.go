@@ -1,27 +1,24 @@
 package risk
 
 import (
-	"math"
-
 	"github.com/cindocode/trenchbot/internal/state"
 )
 
 type PositionSizer struct {
-	store              *state.Store
-	defaultSizeSol     float64
-	defaultSizeBNB     float64
-	dailyLossLimitPct  float64
-	minGasReserveSOL   float64
-	minGasReserveBNB   float64
-	maxPositions       int
+	store            *state.Store
+	defaultSizeSol   float64
+	defaultSizeBNB   float64
+	minGasReserveSOL float64
+	minGasReserveBNB float64
+	maxPositions     int
+	heatFn           func() float64
 }
 
-func NewPositionSizer(store *state.Store, defaultSol, defaultBNB, dailyLossLimitPct float64) *PositionSizer {
+func NewPositionSizer(store *state.Store, defaultSol, defaultBNB float64) *PositionSizer {
 	return &PositionSizer{
-		store:             store,
-		defaultSizeSol:    defaultSol,
-		defaultSizeBNB:    defaultBNB,
-		dailyLossLimitPct: dailyLossLimitPct,
+		store:          store,
+		defaultSizeSol: defaultSol,
+		defaultSizeBNB: defaultBNB,
 	}
 }
 
@@ -39,6 +36,12 @@ func (ps *PositionSizer) SetMaxPositions(max int) {
 	ps.maxPositions = max
 }
 
+// SetHeatFunc sets the function that returns the current heat level (0.0–1.0).
+// Heat reduces position size: size *= (1.0 - heat * 0.5).
+func (ps *PositionSizer) SetHeatFunc(fn func() float64) {
+	ps.heatFn = fn
+}
+
 func (ps *PositionSizer) Size(chain state.Chain, score int) float64 {
 	// Refuse to size if gas is too low for a round-trip (buy + sell).
 	minReserve := ps.minGasReserve(chain)
@@ -51,15 +54,11 @@ func (ps *PositionSizer) Size(chain state.Chain, score int) float64 {
 
 	base := ps.baseSize(chain)
 
-	// Reduce size if approaching daily loss limit
-	dailyPnL := ps.store.GetDailyPnL(chain)
-	if dailyPnL < 0 {
-		peak := ps.store.GetPeakEquity(chain)
-		if peak > 0 {
-			lossRatio := math.Abs(dailyPnL) / peak * 100
-			if lossRatio > ps.dailyLossLimitPct/2 {
-				base *= 0.5 // halve position size when past 50% of daily limit
-			}
+	// Heat-based size reduction: shrink positions as losses mount.
+	if ps.heatFn != nil {
+		heat := ps.heatFn()
+		if heat > 0 {
+			base *= (1.0 - heat*0.5) // range [1.0, 0.5]
 		}
 	}
 

@@ -114,7 +114,7 @@ func main() {
 	solCB := risk.NewCircuitBreaker(risk.CircuitBreakerConfig{
 		Chain:              state.ChainSolana,
 		MaxDrawdownPct:     cfg.TotalDrawdownLimitPct,
-		DailyLossLimitPct:  cfg.DailyLossLimitPct,
+		HeatFullPct:        cfg.HeatFullPct,
 		ConsecutiveLossCap: cfg.ConsecutiveLossPauseThresh,
 		MaxSnipesPerHour:   cfg.MaxSnipesPerHour,
 		StartingEquity:     solBalance,
@@ -125,7 +125,7 @@ func main() {
 		bnbCB = risk.NewCircuitBreaker(risk.CircuitBreakerConfig{
 			Chain:              state.ChainBNB,
 			MaxDrawdownPct:     cfg.TotalDrawdownLimitPct,
-			DailyLossLimitPct:  cfg.DailyLossLimitPct,
+			HeatFullPct:        cfg.HeatFullPct,
 			ConsecutiveLossCap: cfg.ConsecutiveLossPauseThresh,
 			MaxSnipesPerHour:   cfg.MaxSnipesPerHour,
 			StartingEquity:     bnbBalance,
@@ -136,8 +136,9 @@ func main() {
 	store.SetGasBalance(state.ChainSolana, solBalance)
 	store.SetGasBalance(state.ChainBNB, bnbBalance)
 
-	sizer := risk.NewPositionSizer(store, cfg.SolanaSnipeAmount, cfg.BNBSnipeAmount, cfg.DailyLossLimitPct)
+	sizer := risk.NewPositionSizer(store, cfg.SolanaSnipeAmount, cfg.BNBSnipeAmount)
 	sizer.SetMaxPositions(cfg.MaxPositionsTotal)
+	sizer.SetHeatFunc(solCB.Heat)
 	sizer.SetGasReserves(cfg.MinGasReserveSOL, cfg.MinGasReserveBNB)
 
 	// Reporter (works with nil reportStore).
@@ -148,6 +149,7 @@ func main() {
 	}
 
 	tokenFilter := filter.New(cfg.MinScoreThreshold, log)
+	tokenFilter.SetDynamicThreshold(80, solCB.Heat)
 
 	// Wire honeypot checker if enabled.
 	if cfg.HoneypotCheckEnabled {

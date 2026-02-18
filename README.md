@@ -104,7 +104,7 @@ All config is via environment variables. Key ones:
 | `GAS_BUDGET_SOL` | `0.25` | Starting gas balance (~$50) |
 | `MIN_SCORE_THRESHOLD` | `60` | Minimum filter score to buy |
 | `MAX_SNIPES_PER_HOUR` | `10` | Rate limit |
-| `DAILY_LOSS_LIMIT_PCT` | `8` | Daily loss limit (% of peak equity) |
+| `HEAT_FULL_PCT` | `15` | Hourly loss % at which heat reaches 1.0 (throttles filter + sizing) |
 | `DATABASE_URL` | — | PostgreSQL URL (watcher/backtest only) |
 
 ## Deployment

@@ -25,6 +25,8 @@ type Result struct {
 
 type Filter struct {
 	minScore         int
+	maxMinScore      int            // upper bound for dynamic threshold (0 = disabled)
+	heatFn           func() float64 // returns current heat level 0.0–1.0
 	log              *slog.Logger
 	creatorLookup    CreatorLookup
 	honeypotChecker  *HoneypotChecker
@@ -40,6 +42,13 @@ func New(minScore int, log *slog.Logger) *Filter {
 // SetCreatorLookup sets the optional creator history lookup.
 func (f *Filter) SetCreatorLookup(cl CreatorLookup) {
 	f.creatorLookup = cl
+}
+
+// SetDynamicThreshold enables heat-based threshold tightening. When heat > 0,
+// the effective min score rises from base toward maxScore.
+func (f *Filter) SetDynamicThreshold(maxMinScore int, heatFn func() float64) {
+	f.maxMinScore = maxMinScore
+	f.heatFn = heatFn
 }
 
 // SetHoneypotChecker enables pre-buy honeypot detection via GoPlus API.
@@ -71,7 +80,12 @@ func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
 	score += chainScore
 	reasons = append(reasons, chainReasons...)
 
-	approved := score >= f.minScore
+	effectiveMin := f.minScore
+	if f.heatFn != nil && f.maxMinScore > f.minScore {
+		heat := f.heatFn()
+		effectiveMin = f.minScore + int(heat*float64(f.maxMinScore-f.minScore))
+	}
+	approved := score >= effectiveMin
 
 	result := Result{
 		Token:    token,
@@ -85,6 +99,7 @@ func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
 		"symbol", token.Symbol,
 		"address", token.Address,
 		"score", score,
+		"min_score", effectiveMin,
 		"approved", approved,
 		"reasons", strings.Join(reasons, "; "),
 	)

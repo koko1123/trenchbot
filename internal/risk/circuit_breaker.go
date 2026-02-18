@@ -16,7 +16,6 @@ type CircuitBreaker struct {
 	clock               clock.Clock
 	log                 *slog.Logger
 	maxDrawdownPct      float64
-	dailyLossLimitPct   float64
 	consecutiveLossCap  int
 	maxSnipesPerHour    int
 	consecutiveLosses   int
@@ -25,17 +24,17 @@ type CircuitBreaker struct {
 	snipeTimestamps     []time.Time
 	errorTimestamps     []time.Time
 	startingEquity      float64
-	dailyPausedUntil       time.Time
 	consecutivePauseCycles int
+	heatFullPct            float64
 }
 
 type CircuitBreakerConfig struct {
-	Chain               state.Chain
-	MaxDrawdownPct      float64
-	DailyLossLimitPct   float64
-	ConsecutiveLossCap  int
-	MaxSnipesPerHour    int
-	StartingEquity      float64
+	Chain              state.Chain
+	MaxDrawdownPct     float64
+	HeatFullPct        float64 // hourly loss % at which heat reaches 1.0 (default 15)
+	ConsecutiveLossCap int
+	MaxSnipesPerHour   int
+	StartingEquity     float64
 }
 
 func NewCircuitBreaker(cfg CircuitBreakerConfig, store *state.Store, clk clock.Clock, log *slog.Logger) *CircuitBreaker {
@@ -45,7 +44,7 @@ func NewCircuitBreaker(cfg CircuitBreakerConfig, store *state.Store, clk clock.C
 		clock:              clk,
 		log:                log,
 		maxDrawdownPct:     cfg.MaxDrawdownPct,
-		dailyLossLimitPct:  cfg.DailyLossLimitPct,
+		heatFullPct:        cfg.HeatFullPct,
 		consecutiveLossCap: cfg.ConsecutiveLossCap,
 		maxSnipesPerHour:   cfg.MaxSnipesPerHour,
 		startingEquity:     cfg.StartingEquity,
@@ -60,9 +59,6 @@ func (cb *CircuitBreaker) CanSnipe() bool {
 		return false
 	}
 	if cb.clock.Now().Before(cb.pausedUntil) {
-		return false
-	}
-	if cb.clock.Now().Before(cb.dailyPausedUntil) {
 		return false
 	}
 	return !cb.hourlyLimitReached()
@@ -155,22 +151,6 @@ func (cb *CircuitBreaker) Check(currentEquity float64) {
 		)
 	}
 
-	// Loss limit: pause until next PnL reset (hourly).
-	if cb.dailyLossLimitPct > 0 && cb.startingEquity > 0 {
-		dailyPnL := cb.store.GetDailyPnL(cb.chain)
-		if dailyPnL < 0 {
-			dailyLossPct := (-dailyPnL / cb.startingEquity) * 100
-			if dailyLossPct >= cb.dailyLossLimitPct && cb.clock.Now().After(cb.dailyPausedUntil) {
-				pauseUntil := cb.clock.Now().Add(1 * time.Hour)
-				cb.dailyPausedUntil = pauseUntil
-				cb.log.Warn("circuit breaker: loss limit pause",
-					"chain", cb.chain,
-					"loss_pct", dailyLossPct,
-					"paused_until", pauseUntil,
-				)
-			}
-		}
-	}
 }
 
 func (cb *CircuitBreaker) IsHalted() bool {
@@ -187,7 +167,7 @@ func (cb *CircuitBreaker) Status() string {
 	if cb.halted {
 		return "halted"
 	}
-	if cb.clock.Now().Before(cb.pausedUntil) || cb.clock.Now().Before(cb.dailyPausedUntil) {
+	if cb.clock.Now().Before(cb.pausedUntil) {
 		return "paused"
 	}
 	if cb.hourlyLimitReached() {
@@ -203,13 +183,29 @@ func (cb *CircuitBreaker) ConsecutiveLosses() int {
 	return cb.consecutiveLosses
 }
 
-// ResetPauseCycles resets the escalating pause cycle counter and clears the
-// daily loss pause so the bot can resume trading after a PnL reset.
+// ResetPauseCycles resets the escalating pause cycle counter.
 func (cb *CircuitBreaker) ResetPauseCycles() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.consecutivePauseCycles = 0
-	cb.dailyPausedUntil = time.Time{}
+}
+
+// Heat returns the current heat level (0.0–1.0) based on hourly loss relative
+// to heatFullPct. Heat drives dynamic filter tightening and position sizing.
+func (cb *CircuitBreaker) Heat() float64 {
+	pnl := cb.store.GetDailyPnL(cb.chain)
+	if pnl >= 0 {
+		return 0
+	}
+	if cb.startingEquity <= 0 || cb.heatFullPct <= 0 {
+		return 0
+	}
+	lossPct := (-pnl / cb.startingEquity) * 100
+	heat := lossPct / cb.heatFullPct
+	if heat > 1.0 {
+		heat = 1.0
+	}
+	return heat
 }
 
 func (cb *CircuitBreaker) hourlyLimitReached() bool {

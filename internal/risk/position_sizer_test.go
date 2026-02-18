@@ -14,7 +14,7 @@ func almostEqual(a, b, epsilon float64) bool {
 
 func TestSize_BaseCase(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05, 8)
+	ps := NewPositionSizer(store, 0.3, 0.05)
 
 	// score=80 → multiplier=1.0
 	got := ps.Size(state.ChainSolana, 80)
@@ -25,7 +25,7 @@ func TestSize_BaseCase(t *testing.T) {
 
 func TestSize_LowScore(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05, 8)
+	ps := NewPositionSizer(store, 0.3, 0.05)
 
 	// score=60 → multiplier=60/80=0.75
 	got := ps.Size(state.ChainSolana, 60)
@@ -36,7 +36,7 @@ func TestSize_LowScore(t *testing.T) {
 
 func TestSize_MaxScore(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05, 8)
+	ps := NewPositionSizer(store, 0.3, 0.05)
 
 	// score=100 → multiplier=min(100/80, 1.25)=1.25
 	got := ps.Size(state.ChainSolana, 100)
@@ -51,23 +51,34 @@ func TestSize_MaxScore(t *testing.T) {
 	}
 }
 
-func TestSize_DailyLossReduction(t *testing.T) {
+func TestSize_HeatReduction(t *testing.T) {
 	store := state.NewStore()
-	store.SetPeakEquity(state.ChainSolana, 1200)
-	store.UpdateDailyPnL(state.ChainSolana, -60) // 60/1200 = 5% > 4% (half of 8%)
+	ps := NewPositionSizer(store, 0.3, 0.05)
 
-	ps := NewPositionSizer(store, 0.3, 0.05, 8)
+	// No heat → full size
+	fullSize := ps.Size(state.ChainSolana, 80)
+	if !almostEqual(fullSize, 0.3, 0.001) {
+		t.Errorf("full size: got %f, want 0.3", fullSize)
+	}
+
+	// Heat = 0.5 → size *= (1.0 - 0.5*0.5) = 0.75 → 0.3 * 0.75 = 0.225
+	ps.SetHeatFunc(func() float64 { return 0.5 })
 	got := ps.Size(state.ChainSolana, 80)
+	if !almostEqual(got, 0.225, 0.001) {
+		t.Errorf("heat=0.5: got %f, want 0.225", got)
+	}
 
-	// base 0.3 * 0.5 (loss reduction) * 1.0 (score) = 0.15
+	// Heat = 1.0 → size *= 0.5 → 0.3 * 0.5 = 0.15
+	ps.SetHeatFunc(func() float64 { return 1.0 })
+	got = ps.Size(state.ChainSolana, 80)
 	if !almostEqual(got, 0.15, 0.001) {
-		t.Errorf("got %f, want 0.15", got)
+		t.Errorf("heat=1.0: got %f, want 0.15", got)
 	}
 }
 
 func TestSize_BNBChain(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05, 8)
+	ps := NewPositionSizer(store, 0.3, 0.05)
 
 	got := ps.Size(state.ChainBNB, 80)
 	if !almostEqual(got, 0.05, 0.001) {
@@ -77,7 +88,7 @@ func TestSize_BNBChain(t *testing.T) {
 
 func TestSize_GasReserveBlock(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05, 8)
+	ps := NewPositionSizer(store, 0.3, 0.05)
 	ps.SetGasReserves(0.005, 0.002)
 
 	// No gas set — balance is 0, below reserve → should refuse to size.
@@ -104,7 +115,7 @@ func TestSize_GasReserveBlock(t *testing.T) {
 func TestSize_ConcentrationScaling(t *testing.T) {
 	store := state.NewStore()
 	store.SetGasBalance(state.ChainSolana, 1.0)
-	ps := NewPositionSizer(store, 0.3, 0.05, 8)
+	ps := NewPositionSizer(store, 0.3, 0.05)
 	ps.SetGasReserves(0.005, 0.002)
 	ps.SetMaxPositions(5)
 
@@ -135,7 +146,7 @@ func TestSize_ConcentrationScaling(t *testing.T) {
 
 func TestSize_UnknownChain(t *testing.T) {
 	store := state.NewStore()
-	ps := NewPositionSizer(store, 0.3, 0.05, 8)
+	ps := NewPositionSizer(store, 0.3, 0.05)
 
 	got := ps.Size("unknown", 80)
 	if got != 0 {

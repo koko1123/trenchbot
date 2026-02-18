@@ -34,8 +34,8 @@ type Config struct {
 	MaxPositionsPerChain       int     `envconfig:"MAX_CONCURRENT_POSITIONS_PER_CHAIN" default:"10"`
 	MaxPositionsTotal          int     `envconfig:"MAX_CONCURRENT_POSITIONS_TOTAL" default:"15"`
 	MaxSnipesPerHour           int     `envconfig:"MAX_SNIPES_PER_HOUR" default:"10"`
-	DailyLossLimitPct          float64 `envconfig:"DAILY_LOSS_LIMIT_PCT" default:"8"`
-	TotalDrawdownLimitPct      float64 `envconfig:"TOTAL_DRAWDOWN_LIMIT_PCT" default:"40"`
+	HeatFullPct                float64 `envconfig:"HEAT_FULL_PCT" default:"15"`
+	TotalDrawdownLimitPct      float64 `envconfig:"TOTAL_DRAWDOWN_LIMIT_PCT" default:"50"`
 	ConsecutiveLossPauseThresh int     `envconfig:"CONSECUTIVE_LOSS_PAUSE_THRESHOLD" default:"10"`
 
 	// Gas
@@ -112,8 +112,8 @@ func (c *Config) validate() error {
 	if c.MaxSnipesPerHour <= 0 {
 		return fmt.Errorf("MAX_SNIPES_PER_HOUR must be > 0, got %d", c.MaxSnipesPerHour)
 	}
-	if c.DailyLossLimitPct <= 0 || c.DailyLossLimitPct > 100 {
-		return fmt.Errorf("DAILY_LOSS_LIMIT_PCT must be in (0, 100], got %g", c.DailyLossLimitPct)
+	if c.HeatFullPct <= 0 || c.HeatFullPct > 100 {
+		return fmt.Errorf("HEAT_FULL_PCT must be in (0, 100], got %g", c.HeatFullPct)
 	}
 	if c.ConsecutiveLossPauseThresh <= 0 {
 		return fmt.Errorf("CONSECUTIVE_LOSS_PAUSE_THRESHOLD must be > 0, got %d", c.ConsecutiveLossPauseThresh)

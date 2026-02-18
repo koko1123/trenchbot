@@ -18,7 +18,7 @@ func newTestBreaker(clk *clock.SimClock) (*CircuitBreaker, *state.Store) {
 	cb := NewCircuitBreaker(CircuitBreakerConfig{
 		Chain:              state.ChainSolana,
 		MaxDrawdownPct:     50,
-		DailyLossLimitPct:  8,
+		HeatFullPct:        15,
 		ConsecutiveLossCap: 10,
 		MaxSnipesPerHour:   10,
 		StartingEquity:     1200,
@@ -135,42 +135,66 @@ func TestDrawdownHalt_Boundary(t *testing.T) {
 	}
 }
 
-func TestDailyLossLimitPause(t *testing.T) {
-	start := time.Date(2025, 6, 1, 14, 0, 0, 0, time.UTC) // 2pm UTC
-	clk := clock.NewSimClock(start)
-	cb, store := newTestBreaker(clk)
+func TestHeat_NoLoss(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	cb, _ := newTestBreaker(clk)
 
-	// Simulate daily loss of 8% of starting equity (1200 * 0.08 = 96)
-	store.UpdateDailyPnL(state.ChainSolana, -96)
-	cb.Check(1104) // equity dropped but not enough for drawdown halt
-
-	if cb.CanSnipe() {
-		t.Error("should be paused after daily loss limit hit")
-	}
-
-	// Advance to just before 1 hour — still paused
-	clk.Advance(59 * time.Minute)
-	if cb.CanSnipe() {
-		t.Error("should still be paused before 1 hour")
-	}
-
-	// Advance past 1 hour
-	clk.Advance(2 * time.Minute)
-	if !cb.CanSnipe() {
-		t.Error("should be unpaused after 1 hour")
+	heat := cb.Heat()
+	if heat != 0 {
+		t.Errorf("heat should be 0 with no losses, got %f", heat)
 	}
 }
 
-func TestDailyLossLimitNotTriggered(t *testing.T) {
+func TestHeat_PartialLoss(t *testing.T) {
 	clk := clock.NewSimClock(time.Now())
 	cb, store := newTestBreaker(clk)
 
-	// 7% daily loss — below 8% limit
-	store.UpdateDailyPnL(state.ChainSolana, -84)
-	cb.Check(1116)
+	// 7.5% hourly loss on 1200 equity → heat = 7.5/15 = 0.5
+	store.UpdateDailyPnL(state.ChainSolana, -90)
+	heat := cb.Heat()
+	if !almostEqual(heat, 0.5, 0.01) {
+		t.Errorf("heat should be ~0.5, got %f", heat)
+	}
+}
 
-	if !cb.CanSnipe() {
-		t.Error("7% daily loss should not trigger pause")
+func TestHeat_FullLoss(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	cb, store := newTestBreaker(clk)
+
+	// 15% hourly loss on 1200 equity → heat = 15/15 = 1.0
+	store.UpdateDailyPnL(state.ChainSolana, -180)
+	heat := cb.Heat()
+	if !almostEqual(heat, 1.0, 0.01) {
+		t.Errorf("heat should be 1.0, got %f", heat)
+	}
+}
+
+func TestHeat_CappedAtOne(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	cb, store := newTestBreaker(clk)
+
+	// 25% hourly loss → heat should still be capped at 1.0
+	store.UpdateDailyPnL(state.ChainSolana, -300)
+	heat := cb.Heat()
+	if heat != 1.0 {
+		t.Errorf("heat should be capped at 1.0, got %f", heat)
+	}
+}
+
+func TestHeat_WinningReducesHeat(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	cb, store := newTestBreaker(clk)
+
+	// Start with losses → heat > 0
+	store.UpdateDailyPnL(state.ChainSolana, -90) // heat = 0.5
+	heat1 := cb.Heat()
+
+	// Winning trade reduces loss
+	store.UpdateDailyPnL(state.ChainSolana, 60) // net = -30, heat = (30/1200*100)/15 ≈ 0.167
+	heat2 := cb.Heat()
+
+	if heat2 >= heat1 {
+		t.Errorf("heat should decrease after winning: before=%f after=%f", heat1, heat2)
 	}
 }
 

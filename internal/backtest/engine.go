@@ -55,13 +55,13 @@ func NewEngine(cfg BacktestConfig, log *slog.Logger) *Engine {
 	breaker := risk.NewCircuitBreaker(risk.CircuitBreakerConfig{
 		Chain:              state.ChainSolana,
 		MaxDrawdownPct:     50,
-		DailyLossLimitPct:  8,
+		HeatFullPct:        15,
 		ConsecutiveLossCap: 10,
 		MaxSnipesPerHour:   10,
 		StartingEquity:     cfg.StartingEquity,
 	}, store, clk, log)
 
-	sizer := risk.NewPositionSizer(store, 0.3, 0.05, 8)
+	sizer := risk.NewPositionSizer(store, 0.3, 0.05)
 	sizer.SetMaxPositions(5)
 	sizer.SetGasReserves(cfg.GasCostPerTx*10, 0)
 	filt := filter.New(cfg.MinScore, log)
