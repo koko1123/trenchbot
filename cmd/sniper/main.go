@@ -25,6 +25,7 @@ import (
 )
 
 func main() {
+	// Shadow mode logs at DEBUG (verbose); live mode logs at INFO (actions only).
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	cfg, err := config.Load()
@@ -36,6 +37,9 @@ func main() {
 	mode := "SHADOW"
 	if cfg.IsLive() {
 		mode = "LIVE"
+	} else {
+		// In shadow mode, enable DEBUG to see per-token scoring and detection.
+		log = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	log.Info("trenchbot starting", "mode", mode)
 
@@ -57,6 +61,14 @@ func main() {
 
 	clk := clock.RealClock{}
 	store := state.NewStore()
+
+	// Restore state from previous run.
+	if err := store.LoadSnapshot(cfg.StateSnapshotPath); err != nil {
+		log.Warn("failed to load state snapshot", "err", err)
+	} else {
+		log.Info("state snapshot loaded", "path", cfg.StateSnapshotPath)
+	}
+
 	notifier := notify.New(cfg.SentryDSN, log)
 
 	// Postgres reporter (optional).
@@ -119,19 +131,13 @@ func main() {
 		}, store, clk, log)
 	}
 
-	// Initialize gas balances.
-	store.SetGasBalance(state.ChainSolana, cfg.GasBudgetSOL)
-	store.SetGasBalance(state.ChainBNB, cfg.GasBudgetBNB)
+	// Initialize gas balances from actual wallet balance.
+	store.SetGasBalance(state.ChainSolana, solBalance)
+	store.SetGasBalance(state.ChainBNB, bnbBalance)
 
 	sizer := risk.NewPositionSizer(store, cfg.SolanaSnipeAmount, cfg.BNBSnipeAmount, cfg.DailyLossLimitPct)
 	sizer.SetMaxPositions(5)
 	sizer.SetGasReserves(cfg.MinGasReserveSOL, cfg.MinGasReserveBNB)
-	tokenFilter := filter.New(cfg.MinScoreThreshold, log)
-
-	// Wire creator lookup if Postgres is available.
-	if reportStore != nil {
-		tokenFilter.SetCreatorLookup(reportStore)
-	}
 
 	// Reporter (works with nil reportStore).
 	rep := reporter.New(reportStore, store, log)
@@ -140,8 +146,21 @@ func main() {
 		rep.SetCircuitBreaker(state.ChainBNB, bnbCB)
 	}
 
+	tokenFilter := filter.New(cfg.MinScoreThreshold, log)
+
+	// Wire honeypot checker if enabled.
+	if cfg.HoneypotCheckEnabled {
+		tokenFilter.SetHoneypotChecker(filter.NewHoneypotChecker())
+		log.Info("honeypot detection enabled via GoPlus API")
+	}
+
+	// Wire creator lookup if Postgres is available.
+	if reportStore != nil {
+		tokenFilter.SetCreatorLookup(reportStore)
+	}
+
 	executors := make(map[state.Chain]executor.Executor)
-	pumpExec := executor.NewPumpFunExecutor(cfg.PumpPortalTradeURL, solClient, log)
+	pumpExec := executor.NewPumpFunExecutor(cfg.PumpPortalTradeURL, solClient, cfg.SlippagePctSOL, log)
 	executors[state.ChainSolana] = pumpExec
 
 	if bnbClient != nil {
@@ -176,7 +195,8 @@ func main() {
 	}()
 
 	if bnbClient != nil {
-		fourScanner := scanner.NewFourMemeScanner(cfg.BitqueryAPIURL, cfg.BitqueryAPIKey, cfg.FourMemeProxyContract, log)
+		pollInterval := time.Duration(cfg.BitqueryPollIntervalSec) * time.Second
+		fourScanner := scanner.NewFourMemeScanner(cfg.BitqueryAPIURL, cfg.BitqueryAPIKey, cfg.FourMemeProxyContract, pollInterval, log)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -329,6 +349,29 @@ func main() {
 		}
 	}()
 
+	// Periodic state snapshot.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		snapTicker := time.NewTicker(30 * time.Second)
+		defer snapTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-snapTicker.C:
+				if err := store.SaveSnapshot(cfg.StateSnapshotPath); err != nil {
+					log.Warn("failed to save state snapshot", "err", err)
+				}
+			}
+		}
+	}()
+
+	// Semaphore to bound concurrent buy goroutines.
+	workerSem := make(chan struct{}, cfg.MaxConcurrentBuys)
+	// Duplicate token guard prevents processing the same token concurrently.
+	var pendingTokens sync.Map
+
 	log.Info("pipeline started, waiting for tokens...")
 	for {
 		select {
@@ -342,10 +385,23 @@ func main() {
 			rep.SaveReport(context.Background(), snap)
 
 			wg.Wait()
+			if err := store.SaveSnapshot(cfg.StateSnapshotPath); err != nil {
+				log.Warn("failed to save state on shutdown", "err", err)
+			}
 			log.Info("trenchbot stopped")
 			return
 		case token := <-tokenCh:
-			go processToken(ctx, token, tokenFilter, sizer, executors, store, notifier, rep, reportStore, solCB, bnbCB, cfg, log)
+			if _, loaded := pendingTokens.LoadOrStore(token.Address, struct{}{}); loaded {
+				continue
+			}
+			workerSem <- struct{}{} // acquire
+			go func(t scanner.NewToken) {
+				defer func() {
+					<-workerSem // release
+					pendingTokens.Delete(t.Address)
+				}()
+				processToken(ctx, t, tokenFilter, sizer, executors, store, notifier, rep, reportStore, solCB, bnbCB, cfg, log)
+			}(token)
 		}
 	}
 }
@@ -378,12 +434,12 @@ func processToken(
 		cb = bnbCB
 	}
 	if cb == nil || !cb.CanSnipe() {
-		log.Info("snipe blocked by circuit breaker", "chain", token.Chain, "token", token.Symbol)
+		log.Debug("snipe blocked by circuit breaker", "chain", token.Chain, "token", token.Symbol)
 		return
 	}
 
 	if !store.TryReserveSlot(token.Chain, cfg.MaxPositionsPerChain, cfg.MaxPositionsTotal) {
-		log.Info("position limit reached", "chain", token.Chain)
+		log.Debug("position limit reached", "chain", token.Chain)
 		return
 	}
 
@@ -430,6 +486,7 @@ func processToken(
 		CurrentPrice: buyResult.Price,
 		PeakPrice:    buyResult.Price,
 		Amount:       buyResult.Amount,
+		TokenBalance: buyResult.TokenAmount,
 		EntryTime:    time.Now(),
 		EntryGasCost: buyResult.GasCost,
 	})

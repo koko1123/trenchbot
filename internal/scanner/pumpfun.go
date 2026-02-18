@@ -13,10 +13,11 @@ import (
 )
 
 type PumpFunScanner struct {
-	wsURL string
-	log   *slog.Logger
-	mu    sync.Mutex
-	seen  map[string]struct{}
+	wsURL    string
+	log      *slog.Logger
+	mu       sync.Mutex
+	seen     map[string]struct{}
+	prevSeen map[string]struct{}
 }
 
 func NewPumpFunScanner(wsURL string, log *slog.Logger) *PumpFunScanner {
@@ -122,9 +123,14 @@ func (s *PumpFunScanner) connect(ctx context.Context, out chan<- NewToken) error
 			s.mu.Unlock()
 			continue
 		}
+		if _, already := s.prevSeen[token.Mint]; already {
+			s.mu.Unlock()
+			continue
+		}
 		s.seen[token.Mint] = struct{}{}
-		// Cap seen map to prevent unbounded growth.
+		// Two-generation LRU: rotate instead of clearing to avoid re-processing.
 		if len(s.seen) > 10000 {
+			s.prevSeen = s.seen
 			s.seen = make(map[string]struct{})
 		}
 		s.mu.Unlock()
@@ -145,7 +151,7 @@ func (s *PumpFunScanner) connect(ctx context.Context, out chan<- NewToken) error
 			},
 		}
 
-		s.log.Info("new token detected",
+		s.log.Debug("new token detected",
 			"chain", "solana",
 			"symbol", token.Symbol,
 			"mint", token.Mint,

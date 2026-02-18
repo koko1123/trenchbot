@@ -17,15 +17,20 @@ type FourMemeScanner struct {
 	apiURL        string
 	apiKey        string
 	proxyContract string
+	pollInterval  time.Duration
 	log           *slog.Logger
 	client        *http.Client
 }
 
-func NewFourMemeScanner(apiURL, apiKey, proxyContract string, log *slog.Logger) *FourMemeScanner {
+func NewFourMemeScanner(apiURL, apiKey, proxyContract string, pollInterval time.Duration, log *slog.Logger) *FourMemeScanner {
+	if pollInterval <= 0 {
+		pollInterval = 5 * time.Second
+	}
 	return &FourMemeScanner{
 		apiURL:        apiURL,
 		apiKey:        apiKey,
 		proxyContract: proxyContract,
+		pollInterval:  pollInterval,
 		log:           log,
 		client:        &http.Client{Timeout: 30 * time.Second},
 	}
@@ -90,11 +95,12 @@ const bitqueryNewTokenQuery = `{
 }`
 
 func (s *FourMemeScanner) Scan(ctx context.Context, out chan<- NewToken) error {
-	seen := make(map[string]bool)
+	seen := make(map[string]struct{})
+	var prevSeen map[string]struct{}
 
-	s.log.Info("four.meme scanner started", "poll_interval", "5s")
+	s.log.Info("four.meme scanner started", "poll_interval", s.pollInterval)
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(s.pollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -104,18 +110,22 @@ func (s *FourMemeScanner) Scan(ctx context.Context, out chan<- NewToken) error {
 		case <-ticker.C:
 			tokens, err := s.pollNewTokens(ctx, s.proxyContract)
 			if err != nil {
-				s.log.Error("four.meme poll error", "err", err)
+				s.log.Warn("four.meme poll error", "err", err)
 				continue
 			}
 			for _, t := range tokens {
-				if seen[t.Address] {
+				if _, ok := seen[t.Address]; ok {
 					continue
 				}
-				seen[t.Address] = true
-				if len(seen) > 50000 {
-					seen = make(map[string]bool)
+				if _, ok := prevSeen[t.Address]; ok {
+					continue
 				}
-				s.log.Info("new token detected",
+				seen[t.Address] = struct{}{}
+				if len(seen) > 10000 {
+					prevSeen = seen
+					seen = make(map[string]struct{})
+				}
+				s.log.Debug("new token detected",
 					"chain", "bnb",
 					"address", t.Address,
 					"creator", t.Creator,

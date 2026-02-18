@@ -22,9 +22,10 @@ type Result struct {
 }
 
 type Filter struct {
-	minScore      int
-	log           *slog.Logger
-	creatorLookup CreatorLookup
+	minScore         int
+	log              *slog.Logger
+	creatorLookup    CreatorLookup
+	honeypotChecker  *HoneypotChecker
 }
 
 func New(minScore int, log *slog.Logger) *Filter {
@@ -37,6 +38,11 @@ func New(minScore int, log *slog.Logger) *Filter {
 // SetCreatorLookup sets the optional creator history lookup.
 func (f *Filter) SetCreatorLookup(cl CreatorLookup) {
 	f.creatorLookup = cl
+}
+
+// SetHoneypotChecker enables pre-buy honeypot detection via GoPlus API.
+func (f *Filter) SetHoneypotChecker(hc *HoneypotChecker) {
+	f.honeypotChecker = hc
 }
 
 func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
@@ -65,6 +71,18 @@ func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
 
 	approved := score >= f.minScore
 
+	// Honeypot check (only for approved tokens to avoid wasting API calls).
+	if approved && f.honeypotChecker != nil {
+		safe, hpReasons, err := f.honeypotChecker.Check(ctx, token.Chain, token.Address)
+		if err != nil {
+			f.log.Warn("honeypot check error (failing open)", "token", token.Address, "err", err)
+		}
+		if !safe {
+			approved = false
+			reasons = append(reasons, hpReasons...)
+		}
+	}
+
 	result := Result{
 		Token:    token,
 		Score:    score,
@@ -72,7 +90,7 @@ func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
 		Approved: approved,
 	}
 
-	f.log.Info("token scored",
+	f.log.Debug("token scored",
 		"chain", token.Chain,
 		"symbol", token.Symbol,
 		"address", token.Address,
