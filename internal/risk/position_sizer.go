@@ -4,6 +4,7 @@ import (
 	"math"
 	"sync"
 
+	"github.com/cindocode/trenchbot/internal/curve"
 	"github.com/cindocode/trenchbot/internal/state"
 )
 
@@ -14,6 +15,7 @@ type PositionSizer struct {
 	maxPositions     int
 	heatFn           func() float64
 	perfTracker      *PerformanceTracker
+	maxImpactPct     float64 // max price impact per trade (e.g., 2.0 = 2%)
 
 	// Dynamic capital management.
 	mu              sync.RWMutex
@@ -52,6 +54,13 @@ func (ps *PositionSizer) SetHeatFunc(fn func() float64) {
 // SetPerformanceTracker enables Kelly criterion sizing based on rolling performance.
 func (ps *PositionSizer) SetPerformanceTracker(pt *PerformanceTracker) {
 	ps.perfTracker = pt
+}
+
+// SetMaxImpact sets the maximum price impact per trade as a percentage.
+// E.g., 2.0 means the trade should not move the bonding curve by more than 2%.
+// When set, Size() will cap the trade at curve.MaxEntrySOL(mcapSOL, maxImpactPct).
+func (ps *PositionSizer) SetMaxImpact(pct float64) {
+	ps.maxImpactPct = pct
 }
 
 // EnableDynamicLimits turns on capital-aware position limit scaling.
@@ -130,6 +139,28 @@ func (ps *PositionSizer) DynamicMaxTotal() int {
 		return ps.maxPositions
 	}
 	return ps.dynamicMaxTotal
+}
+
+// SizeWithLiquidity computes position size with a liquidity-aware cap.
+// mcapSOL is the current market cap in SOL; if > 0 and maxImpactPct is set,
+// the returned size is capped so the trade doesn't move the bonding curve
+// by more than maxImpactPct.
+func (ps *PositionSizer) SizeWithLiquidity(chain state.Chain, score int, mcapSOL float64) float64 {
+	size := ps.Size(chain, score)
+	if size <= 0 || ps.maxImpactPct <= 0 || mcapSOL <= 0 {
+		return size
+	}
+
+	maxEntry := curve.MaxEntrySOL(mcapSOL, ps.maxImpactPct)
+	if maxEntry > 0 && size > maxEntry {
+		size = maxEntry
+	}
+
+	// Floor: don't go below 0.01 SOL — not worth the gas.
+	if size < 0.01 {
+		return 0
+	}
+	return size
 }
 
 func (ps *PositionSizer) Size(chain state.Chain, score int) float64 {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cindocode/trenchbot/internal/clock"
+	"github.com/cindocode/trenchbot/internal/curve"
 	"github.com/cindocode/trenchbot/internal/executor"
 	"github.com/cindocode/trenchbot/internal/notify"
 	"github.com/cindocode/trenchbot/internal/risk"
@@ -29,6 +30,7 @@ type ExitConfig struct {
 	UniversalTrailingStop      float64       // % drop from peak to exit any position (e.g. 20%)
 	NoTradeTimeout             time.Duration // exit if no trade events for this long (e.g. 2m)
 	NoTradeMaxMult             float64       // only exit dead tokens below this multiplier (e.g. 1.1)
+	PreGradExitProgress        float64       // curve progress above which to tighten trailing stop (0 = disabled)
 }
 
 func DefaultExitConfig() ExitConfig {
@@ -207,6 +209,17 @@ func (m *Monitor) evaluateExit(ctx context.Context, pos *state.Position) {
 	if pos.SoldPct >= m.exitCfg.Tranche1Pct+m.exitCfg.Tranche2Pct {
 		if dropFromPeak >= m.exitCfg.TrailingStop {
 			m.executeSell(ctx, pos, 100-pos.SoldPct, "trailing-stop")
+			return
+		}
+	}
+
+	// Pre-graduation exit bias: near graduation, the bonding curve liquidity
+	// is guaranteed but post-graduation liquidity may be thin. Tighten trailing
+	// stop to 10% when curve progress exceeds threshold.
+	if m.exitCfg.PreGradExitProgress > 0 && pos.EntryPriceUSD > 0 {
+		progress := curve.Progress(pos.EntryPriceUSD * (multiplier))
+		if progress >= m.exitCfg.PreGradExitProgress && multiplier > 1.0 && dropFromPeak >= 10 {
+			m.executeSell(ctx, pos, 100-pos.SoldPct, "pre-graduation-trailing")
 			return
 		}
 	}

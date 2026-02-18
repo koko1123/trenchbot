@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/cindocode/trenchbot/internal/curve"
 	"github.com/cindocode/trenchbot/internal/jito"
 	"github.com/cindocode/trenchbot/internal/state"
 	"github.com/cindocode/trenchbot/internal/wallet"
@@ -67,23 +68,19 @@ func (e *PumpFunExecutor) SetWalletPool(wp *wallet.Pool) {
 }
 
 // computeSlippage returns the appropriate slippage for a trade.
-func (e *PumpFunExecutor) computeSlippage(mcapSOL float64) int {
+// Uses exact bonding curve math when dynamic slippage is enabled.
+func (e *PumpFunExecutor) computeSlippage(buySOL, mcapSOL float64) int {
 	if !e.dynamicSlippage {
 		return e.slippage
 	}
 
-	base := 15
-	if mcapSOL > 100 {
-		base = 8
-	} else if mcapSOL > 50 {
-		base = 12
-	} else if mcapSOL < 10 {
-		base = 30
-	}
+	// Use bonding curve math for exact price impact calculation.
+	base := curve.OptimalSlippage(buySOL, mcapSOL)
 
+	// Heat adjustment: increase slippage tolerance during volatile periods.
 	if e.heatFn != nil {
 		heat := e.heatFn()
-		base += int(heat * 10)
+		base += int(heat * 5)
 	}
 
 	if base > 49 {
@@ -186,7 +183,7 @@ func (e *PumpFunExecutor) Buy(ctx context.Context, params BuyParams) BuyResult {
 		e.log.Debug("jito available but using pumpportal fallback", "token", params.TokenAddress)
 	}
 
-	slippage := e.computeSlippage(params.McapSOL)
+	slippage := e.computeSlippage(params.Amount, params.McapSOL)
 	priorityFee := e.computePriorityFee(ctx, UrgencyNormal, params.Score)
 
 	req := pumpTradeRequest{

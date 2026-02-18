@@ -89,6 +89,13 @@ type TradeRecord struct {
 	EntryHeat     float64
 	HoldDuration  time.Duration
 	BotBuyCount   int // 0 if no bot activity detected
+
+	// Quantitative signals.
+	LiquidityVelocity float64
+	OFIAcceleration   float64
+	TradeEntropy      float64
+	CurveProgress     float64
+	MaxTradeSize      float64
 }
 
 // GenerateAssessment produces a structured assessment from a slice of trade records.
@@ -259,6 +266,11 @@ func computeFloatSignalCorrelations(winners, losers []TradeRecord) []SignalCorre
 		{"ObsGrowthRate", func(r TradeRecord) float64 { return r.ObsGrowthRate }},
 		{"ObsTimingCV", func(r TradeRecord) float64 { return r.ObsTimingCV }},
 		{"HolderTopPct", func(r TradeRecord) float64 { return r.HolderTopPct }},
+		{"LiquidityVelocity", func(r TradeRecord) float64 { return r.LiquidityVelocity }},
+		{"OFIAcceleration", func(r TradeRecord) float64 { return r.OFIAcceleration }},
+		{"TradeEntropy", func(r TradeRecord) float64 { return r.TradeEntropy }},
+		{"CurveProgress", func(r TradeRecord) float64 { return r.CurveProgress }},
+		{"MaxTradeSize", func(r TradeRecord) float64 { return r.MaxTradeSize }},
 	}
 
 	var correlations []SignalCorrelation

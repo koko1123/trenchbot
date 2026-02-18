@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
@@ -328,6 +329,58 @@ func (c *Client) GetBalanceWithFallback(ctx context.Context) (float64, error) {
 		}
 	}
 	return 0, err
+}
+
+// TransferSOL sends native SOL to the given address. Returns the tx signature.
+func (c *Client) TransferSOL(ctx context.Context, toAddress string, amountSOL float64) (string, error) {
+	if c.wallet == nil {
+		return "", fmt.Errorf("no wallet configured")
+	}
+	if amountSOL <= 0 {
+		return "", fmt.Errorf("amount must be positive, got %f", amountSOL)
+	}
+
+	to, err := solana.PublicKeyFromBase58(toAddress)
+	if err != nil {
+		return "", fmt.Errorf("invalid destination address: %w", err)
+	}
+
+	lamports := uint64(amountSOL * 1e9)
+
+	recent, err := c.rpc.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		return "", fmt.Errorf("get recent blockhash: %w", err)
+	}
+
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{
+			system.NewTransferInstruction(lamports, c.wallet.PublicKey(), to).Build(),
+		},
+		recent.Value.Blockhash,
+		solana.TransactionPayer(c.wallet.PublicKey()),
+	)
+	if err != nil {
+		return "", fmt.Errorf("build transfer tx: %w", err)
+	}
+
+	_, err = tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
+		if key.Equals(c.wallet.PublicKey()) {
+			return &c.wallet
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("sign transfer tx: %w", err)
+	}
+
+	sig, err := c.rpc.SendTransactionWithOpts(ctx, tx, rpc.TransactionOpts{
+		SkipPreflight: false,
+	})
+	if err != nil {
+		return "", fmt.Errorf("send transfer tx: %w", err)
+	}
+
+	return sig.String(), nil
 }
 
 // --- SPL Token Balance ---

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cindocode/trenchbot/internal/capital"
 	"github.com/cindocode/trenchbot/internal/clock"
 	"github.com/cindocode/trenchbot/internal/config"
 	"github.com/cindocode/trenchbot/internal/executor"
@@ -132,6 +133,7 @@ func main() {
 	sizer.SetMaxPositions(cfg.MaxPositionsTotal)
 	sizer.SetHeatFunc(solCB.Heat)
 	sizer.SetGasReserve(cfg.MinGasReserveSOL)
+	sizer.SetMaxImpact(cfg.MaxTradeImpactPct)
 
 	// Wire Kelly criterion if enabled.
 	if cfg.KellyEnabled {
@@ -212,6 +214,7 @@ func main() {
 	exitCfg.UniversalTrailingStop = cfg.UniversalTrailingStop
 	exitCfg.NoTradeTimeout = time.Duration(cfg.NoTradeTimeoutSec) * time.Second
 	exitCfg.NoTradeMaxMult = cfg.NoTradeMaxMult
+	exitCfg.PreGradExitProgress = cfg.PreGradExitProgress
 	mon := monitor.New(store, executors, notifier, exitCfg, clk, !cfg.IsLive(), log)
 
 	mon.SetCircuitBreakers(map[state.Chain]*risk.CircuitBreaker{
@@ -228,6 +231,26 @@ func main() {
 		"bundle_detection", cfg.BundleDetectionEnabled,
 	)
 
+	// Survival model (Phase 6): offline-trained, runtime inference.
+	var survivalModel *flow.SurvivalModel
+	if cfg.SurvivalModelPath != "" {
+		var err error
+		survivalModel, err = flow.LoadSurvivalModel(cfg.SurvivalModelPath)
+		if err != nil {
+			log.Warn("failed to load survival model, using defaults", "err", err)
+			survivalModel = flow.DefaultSurvivalModel()
+		} else {
+			log.Info("survival model loaded", "path", cfg.SurvivalModelPath, "features", len(survivalModel.Features))
+		}
+	}
+
+	// Thompson sampling (Phase 7): multi-token allocation optimization.
+	var thompsonSampler *flow.ThompsonSampler
+	if cfg.ThompsonSamplingEnabled {
+		thompsonSampler = flow.NewThompsonSampler()
+		log.Info("thompson sampling enabled")
+	}
+
 	// Bot dump delayed entry (Phase 3D).
 	var delayedEntry *flow.DelayedEntry
 	if cfg.BotDumpDelayEnabled {
@@ -242,11 +265,16 @@ func main() {
 	pumpScanner := scanner.NewPumpFunScanner(cfg.PumpPortalWSURL, log)
 	pumpScanner.SetTradeChannel(tradeCh)
 
+	// Per-position CUSUM anomaly detectors for open positions.
+	var positionAnomalyDetectors sync.Map // mint -> *flow.TokenAnomalyDetector
+
 	// Unsubscribe from trade feed when positions close + update creator reputation.
 	mon.SetOnPositionClose(func(chain state.Chain, tokenAddress string) {
 		if chain == state.ChainSolana {
 			pumpScanner.UnsubscribeToken(tokenAddress)
 		}
+		// Clean up CUSUM anomaly detector for this position.
+		positionAnomalyDetectors.Delete(tokenAddress)
 		// Update creator reputation from closed position.
 		creatorVal, ok := creatorMap.LoadAndDelete(tokenAddress)
 		if !ok {
@@ -264,6 +292,30 @@ func main() {
 			}
 			isRug := peakMult < 0.3
 			reputationDB.RecordOutcome(creator, peakMult, pos.HoldDuration, isRug)
+
+			// Update Thompson sampler with outcome.
+			if thompsonSampler != nil {
+				obs := flow.ObservationResult{
+					OFI:               pos.OFI,
+					LiquidityVelocity: pos.LiquidityVelocity,
+					BotBuyCount:       pos.BotBuyCount,
+				}
+				bucketKey := flow.BucketKey(obs, pos.FilterScore)
+				won := peakMult > 1.5
+				thompsonSampler.Update(bucketKey, won)
+			}
+
+			// Close observation in Postgres for survival model training.
+			if reportStore != nil {
+				pnlPct := (peakMult - 1.0) * 100
+				if pos.PnL != 0 {
+					pnlPct = pos.PnL
+				}
+				holdSec := pos.HoldDuration.Seconds()
+				if err := reportStore.CloseObservation(ctx, pos.ID, holdSec, pnlPct, peakMult, pos.ExitReason); err != nil {
+					log.Warn("failed to close observation", "err", err)
+				}
+			}
 			break
 		}
 	})
@@ -364,7 +416,7 @@ func main() {
 							workerSem <- struct{}{} // acquire
 							defer func() { <-workerSem }()
 							processToken(ctx, t, tokenFilter, sizer, executors, store, notifier, rep, reportStore,
-								solCB, pumpScanner, &tradeObservers, perfTracker, bundleDetector, reputationDB, botDB, delayedEntry, &creatorMap, cfg, log)
+								solCB, pumpScanner, &tradeObservers, perfTracker, bundleDetector, reputationDB, botDB, delayedEntry, &creatorMap, &positionAnomalyDetectors, survivalModel, thompsonSampler, cfg, log)
 						}(token)
 					}
 				}
@@ -390,6 +442,26 @@ func main() {
 				// Track sell pressure for open positions (Phase 5B).
 				if trade.TxType == "sell" && trade.SolAmount >= 5.0 {
 					mon.RecordSellPressure(ctx, trade.Mint, trade.SolAmount)
+				}
+
+				// CUSUM anomaly detection for open positions (Phase 3).
+				if cfg.CUSUMEnabled {
+					if v, ok := positionAnomalyDetectors.Load(trade.Mint); ok {
+						detector := v.(*flow.TokenAnomalyDetector)
+						sig := detector.Feed(trade.TxType, trade.SolAmount, time.Now())
+						if sig.SellOnset {
+							log.Info("CUSUM sell onset detected for open position",
+								"mint", trade.Mint,
+								"sol_amount", trade.SolAmount,
+							)
+							// Trigger immediate exit evaluation for all positions with this mint.
+							for _, pos := range store.AllOpenPositions() {
+								if pos.TokenAddress == trade.Mint {
+									mon.EvaluatePosition(ctx, pos.ID)
+								}
+							}
+						}
+					}
 				}
 
 				if trade.MarketCapSol <= 0 {
@@ -544,19 +616,47 @@ func main() {
 		}
 	}()
 
-	// Capital refresh + gas refueler (every 30s).
+	// Capital capacity estimate at startup.
+	maxExposure := float64(cfg.MaxPositionsTotal) * cfg.SolanaSnipeAmount
+	gasNeeds := 200.0 * cfg.GasCostPerTxSOL * 2
+	hourlyDeploy := float64(cfg.MaxSnipesPerHour) * cfg.SolanaSnipeAmount
+	log.Info("capital capacity estimate",
+		"max_concurrent_exposure_sol", fmt.Sprintf("%.2f", maxExposure),
+		"hourly_deploy_capacity_sol", fmt.Sprintf("%.2f", hourlyDeploy),
+		"gas_budget_sol", fmt.Sprintf("%.4f", gasNeeds),
+		"reserve_needed_sol", cfg.SweepReserveSOL,
+		"bank_address", cfg.BankAddress,
+		"sweep_enabled", cfg.BankAddress != "",
+	)
+
+	// Capital refresh + gas refueler + capital sweep (every 30s).
 	var refueler *gas.Refueler
 	if cfg.GasRefuelEnabled {
 		refueler = gas.NewRefueler(solClient, store, mon, gas.RefuelerConfig{
-			USDCMint:    cfg.USDCMint,
 			Threshold:   cfg.GasRefuelThreshold,
-			Amount:      cfg.GasRefuelAmount,
 			CooldownMin: cfg.GasRefuelCooldownMin,
 			Shadow:      !cfg.IsLive(),
 		}, log)
 		log.Info("gas refueler enabled",
 			"threshold", cfg.GasRefuelThreshold,
-			"amount", cfg.GasRefuelAmount,
+		)
+	}
+
+	sweeper := capital.NewSweeper(solClient, store, capital.SweeperConfig{
+		BankAddress:   cfg.BankAddress,
+		ReserveSOL:    cfg.SweepReserveSOL,
+		IdleThreshold: cfg.SweepIdleThreshold,
+		IdleMinutes:   cfg.SweepIdleMinutes,
+		CooldownMin:   cfg.SweepCooldownMin,
+		MinSweepSOL:   cfg.SweepMinSOL,
+		Shadow:        !cfg.IsLive(),
+	}, log)
+	if sweeper != nil {
+		log.Info("capital sweeper enabled",
+			"bank_address", cfg.BankAddress,
+			"reserve_sol", cfg.SweepReserveSOL,
+			"idle_threshold", cfg.SweepIdleThreshold,
+			"idle_minutes", cfg.SweepIdleMinutes,
 		)
 	}
 
@@ -595,6 +695,11 @@ func main() {
 				if refueler != nil {
 					refueler.Check(ctx)
 				}
+
+				// Capital sweep check.
+				if sweeper != nil {
+					sweeper.Check(ctx)
+				}
 			}
 		}
 	}()
@@ -630,7 +735,7 @@ func main() {
 					<-workerSem // release
 					pendingTokens.Delete(t.Address)
 				}()
-				processToken(ctx, t, tokenFilter, sizer, executors, store, notifier, rep, reportStore, solCB, pumpScanner, &tradeObservers, perfTracker, bundleDetector, reputationDB, botDB, delayedEntry, &creatorMap, cfg, log)
+				processToken(ctx, t, tokenFilter, sizer, executors, store, notifier, rep, reportStore, solCB, pumpScanner, &tradeObservers, perfTracker, bundleDetector, reputationDB, botDB, delayedEntry, &creatorMap, &positionAnomalyDetectors, survivalModel, thompsonSampler, cfg, log)
 			}(token)
 		}
 	}
@@ -655,6 +760,9 @@ func processToken(
 	botDB *flow.BotDB,
 	delayedEntry *flow.DelayedEntry, // nil if disabled
 	creatorMap *sync.Map, // tokenAddress -> creator for reputation tracking
+	positionAnomalyDetectors *sync.Map, // mint -> *flow.TokenAnomalyDetector
+	survivalModel *flow.SurvivalModel, // nil if disabled
+	thompsonSampler *flow.ThompsonSampler, // nil if disabled
 	cfg *config.Config,
 	log *slog.Logger,
 ) {
@@ -696,15 +804,64 @@ func processToken(
 			observeDuration = time.Duration(float64(observeDuration) * mult)
 		}
 
-		select {
-		case <-time.After(observeDuration):
-		case <-ctx.Done():
-			tradeObservers.Delete(token.Address)
-			pumpScanner.UnsubscribeToken(token.Address)
-			return
+		// Adaptive observation: poll every 500ms and buy early if quality is high.
+		if cfg.AdaptiveObservation {
+			maxDuration := time.Duration(cfg.ObservationMaxSecs) * time.Second
+			if maxDuration > observeDuration {
+				observeDuration = maxDuration
+			}
+			stopper := flow.NewAdaptiveStopper(int(observeDuration.Seconds()))
+			startTime := time.Now()
+			ticker := time.NewTicker(500 * time.Millisecond)
+			earlyBuy := false
+
+		adaptiveLoop:
+			for {
+				select {
+				case <-ctx.Done():
+					ticker.Stop()
+					tradeObservers.Delete(token.Address)
+					pumpScanner.UnsubscribeToken(token.Address)
+					return
+				case <-ticker.C:
+					elapsed := time.Since(startTime)
+					obsResult = observer.Result()
+
+					// Minimum trades gate: need at least MinTradesBeforeBuy.
+					if obsResult.TradeCount >= cfg.MinTradesBeforeBuy {
+						quality := flow.QualityScore(obsResult)
+						if stopper.ShouldBuy(elapsed, quality) {
+							earlyBuy = elapsed < observeDuration-500*time.Millisecond
+							if earlyBuy {
+								log.Debug("adaptive observation: early buy triggered",
+									"token", token.Symbol,
+									"elapsed", elapsed,
+									"quality", quality,
+									"threshold", stopper.Threshold(elapsed),
+								)
+							}
+							ticker.Stop()
+							break adaptiveLoop
+						}
+					}
+
+					if elapsed >= observeDuration {
+						ticker.Stop()
+						break adaptiveLoop
+					}
+				}
+			}
+		} else {
+			select {
+			case <-time.After(observeDuration):
+			case <-ctx.Done():
+				tradeObservers.Delete(token.Address)
+				pumpScanner.UnsubscribeToken(token.Address)
+				return
+			}
+			obsResult = observer.Result()
 		}
 
-		obsResult = observer.Result()
 		tradeObservers.Delete(token.Address)
 
 		// Basic volume check.
@@ -780,10 +937,77 @@ func processToken(
 			return
 		}
 
+		// Liquidity velocity check: strongest graduation predictor.
+		if cfg.MinLiquidityVelocity > 0 && obsResult.LiquidityVelocity < cfg.MinLiquidityVelocity {
+			log.Debug("token failed liquidity velocity check, skipping",
+				"token", token.Symbol,
+				"velocity", obsResult.LiquidityVelocity,
+				"required", cfg.MinLiquidityVelocity,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// OFI acceleration check: fading buy pressure = likely top.
+		if cfg.MaxOFIDeceleration != 0 && obsResult.OFIAcceleration < cfg.MaxOFIDeceleration {
+			log.Debug("token OFI decelerating, skipping",
+				"token", token.Symbol,
+				"ofi_accel", obsResult.OFIAcceleration,
+				"threshold", cfg.MaxOFIDeceleration,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// CUSUM anomaly detection: skip if sell onset detected during observation.
+		if cfg.CUSUMEnabled && obsResult.AnomalyDetected {
+			log.Debug("CUSUM anomaly detected during observation, skipping",
+				"token", token.Symbol,
+				"sell_onset", obsResult.AnomalySignal.SellOnset,
+				"buy_collapse", obsResult.AnomalySignal.BuyCollapse,
+				"size_shift", obsResult.AnomalySignal.SizeShift,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// Survival model: meta-filter combining all signals through trained lens.
+		if survivalModel != nil {
+			survScore := survivalModel.SurvivalScore(obsResult, result.Score)
+			if survScore < -0.5 {
+				log.Debug("token failed survival model check, skipping",
+					"token", token.Symbol,
+					"survival_score", survScore,
+				)
+				pumpScanner.UnsubscribeToken(token.Address)
+				return
+			}
+		}
+
+		// Thompson sampling: skip if sampled win rate for this token type is too low.
+		if thompsonSampler != nil {
+			bucketKey := flow.BucketKey(obsResult, result.Score)
+			sampledScore := thompsonSampler.Score(bucketKey)
+			if sampledScore < 0.15 {
+				log.Debug("thompson sampling: token type has poor history, skipping",
+					"token", token.Symbol,
+					"bucket", bucketKey,
+					"sampled_score", sampledScore,
+					"win_rate", thompsonSampler.WinRate(bucketKey),
+				)
+				pumpScanner.UnsubscribeToken(token.Address)
+				return
+			}
+		}
+
 		log.Debug("token passed observation checks",
 			"token", token.Symbol,
 			"trades", obsResult.TradeCount,
 			"ofi", obsResult.OFI,
+			"ofi_accel", obsResult.OFIAcceleration,
+			"velocity", obsResult.LiquidityVelocity,
+			"entropy", obsResult.TradeEntropy,
+			"curve_progress", obsResult.CurveProgress,
 			"growth_pct", obsResult.GrowthRate*100,
 			"timing_cv", obsResult.TimingCV,
 			"bot_buys", obsResult.BotBuyCount,
@@ -807,8 +1031,20 @@ func processToken(
 		return
 	}
 
-	size := sizer.Size(token.Chain, result.Score)
+	// Extract mcap for dynamic slippage and liquidity-aware sizing.
+	mcapSOL := 0.0
+	if v, ok := token.Metadata["marketCapSol"]; ok {
+		if mc, ok := v.(float64); ok {
+			mcapSOL = mc
+		}
+	}
+
+	size := sizer.SizeWithLiquidity(token.Chain, result.Score, mcapSOL)
 	if size <= 0 {
+		log.Debug("position size zero (liquidity too thin or gas low)",
+			"token", token.Symbol,
+			"mcap_sol", mcapSOL,
+		)
 		store.ReleaseSlot(token.Chain)
 		if token.Chain == state.ChainSolana {
 			pumpScanner.UnsubscribeToken(token.Address)
@@ -824,14 +1060,6 @@ func processToken(
 			pumpScanner.UnsubscribeToken(token.Address)
 		}
 		return
-	}
-
-	// Extract mcap for dynamic slippage.
-	mcapSOL := 0.0
-	if v, ok := token.Metadata["marketCapSol"]; ok {
-		if mc, ok := v.(float64); ok {
-			mcapSOL = mc
-		}
 	}
 
 	shadow := !cfg.IsLive()
@@ -876,8 +1104,13 @@ func processToken(
 		OFI:           obsResult.OFI,
 		ObsGrowthRate: obsResult.GrowthRate,
 		ObsTimingCV:   obsResult.TimingCV,
-		EntryHeat:     solCB.Heat(),
-		BotBuyCount:   obsResult.BotBuyCount,
+		EntryHeat:         solCB.Heat(),
+		BotBuyCount:       obsResult.BotBuyCount,
+		LiquidityVelocity: obsResult.LiquidityVelocity,
+		OFIAcceleration:   obsResult.OFIAcceleration,
+		TradeEntropy:      obsResult.TradeEntropy,
+		CurveProgress:     obsResult.CurveProgress,
+		MaxTradeSize:      obsResult.MaxTradeSize,
 	})
 	store.ConsumeSlot(token.Chain)
 
@@ -909,6 +1142,35 @@ func processToken(
 		CreatedAt:    now,
 	})
 
+	// Record observation features to Postgres for survival model training.
+	if reportStore != nil {
+		if err := reportStore.InsertObservation(ctx, reporter.TokenObservation{
+			ID:                posID,
+			TokenAddress:      token.Address,
+			TokenSymbol:       token.Symbol,
+			Chain:             string(token.Chain),
+			Shadow:            shadow,
+			LiquidityVelocity: obsResult.LiquidityVelocity,
+			OFI:               obsResult.OFI,
+			OFIAcceleration:   obsResult.OFIAcceleration,
+			TradeEntropy:      obsResult.TradeEntropy,
+			TimingCV:          obsResult.TimingCV,
+			BotBuyCount:       obsResult.BotBuyCount,
+			BuyCount:          obsResult.BuyCount,
+			CurveProgress:     obsResult.CurveProgress,
+			FilterScore:       result.Score,
+			GrowthRate:        obsResult.GrowthRate,
+			MaxTradeSize:      obsResult.MaxTradeSize,
+			TradeCount:        obsResult.TradeCount,
+			SellCount:         obsResult.SellCount,
+			EntryHeat:         solCB.Heat(),
+			EntryMcapSOL:      mcapSOL,
+			EntrySizeSOL:      size,
+		}); err != nil {
+			log.Warn("failed to insert observation", "err", err)
+		}
+	}
+
 	// Store creator for reputation tracking + future lookups.
 	if token.Creator != "" {
 		creatorMap.Store(token.Address, token.Creator)
@@ -920,6 +1182,11 @@ func processToken(
 	}
 
 	notifier.Snipe(ctx, string(token.Chain), token.Symbol, token.Address, size, buyResult.Price, shadow)
+
+	// Start CUSUM anomaly detector for this position.
+	if cfg.CUSUMEnabled {
+		positionAnomalyDetectors.Store(token.Address, flow.NewTokenAnomalyDetector())
+	}
 
 	// Subscribe to real-time trade events for this token's price updates.
 	if token.Chain == state.ChainSolana {

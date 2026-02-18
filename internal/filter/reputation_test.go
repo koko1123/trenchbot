@@ -135,6 +135,68 @@ func TestReputationDB_ObservationMultipliers(t *testing.T) {
 	}
 }
 
+func TestCreatorReputation_BayesianPriors(t *testing.T) {
+	db := NewReputationDB()
+
+	// Creator with 2 wins, 0 losses: Alpha=3, Beta=1.
+	// Should be neutral — not enough data to be confident.
+	twoWins := "TwoWins111111111111111111111111111111111111"
+	db.RecordOutcome(twoWins, 3.0, 10*time.Minute, false)
+	db.RecordOutcome(twoWins, 2.5, 15*time.Minute, false)
+	rep := db.GetReputation(twoWins)
+	if rep.Alpha != 3 || rep.Beta != 1 {
+		t.Fatalf("expected Alpha=3, Beta=1, got Alpha=%g, Beta=%g", rep.Alpha, rep.Beta)
+	}
+	if mod := db.ScoreModifier(twoWins); mod != 0 {
+		t.Fatalf("expected 0 for 2 wins (insufficient data), got %d", mod)
+	}
+
+	// Creator with 20 wins, 5 losses: Alpha=21, Beta=6.
+	// Should be trusted — confident win rate estimate.
+	manyWins := "ManyWins11111111111111111111111111111111111"
+	for i := 0; i < 20; i++ {
+		db.RecordOutcome(manyWins, 3.0, 10*time.Minute, false)
+	}
+	for i := 0; i < 5; i++ {
+		db.RecordOutcome(manyWins, 0.5, 2*time.Minute, false) // losses but not rugs
+	}
+	rep = db.GetReputation(manyWins)
+	if rep.Alpha != 21 || rep.Beta != 6 {
+		t.Fatalf("expected Alpha=21, Beta=6, got Alpha=%g, Beta=%g", rep.Alpha, rep.Beta)
+	}
+	lower := rep.LowerCredible(0.80)
+	if lower < 0.55 {
+		t.Fatalf("expected lower credible bound > 0.55 for 20/25 wins, got %g", lower)
+	}
+	if mod := db.ScoreModifier(manyWins); mod != 10 {
+		t.Fatalf("expected +10 for many wins, got %d", mod)
+	}
+}
+
+func TestCreatorReputation_ExpectedWinRate(t *testing.T) {
+	rep := &CreatorReputation{Alpha: 4, Beta: 2}
+	expected := 4.0 / 6.0
+	got := rep.ExpectedWinRate()
+	if got < expected-0.01 || got > expected+0.01 {
+		t.Fatalf("expected win rate ~%g, got %g", expected, got)
+	}
+}
+
+func TestCreatorReputation_LowerCredibleMonotonic(t *testing.T) {
+	// Lower bound should increase as we add more wins.
+	var bounds []float64
+	rep := &CreatorReputation{Alpha: 1, Beta: 1}
+	for i := 0; i < 20; i++ {
+		rep.Alpha++
+		bounds = append(bounds, rep.LowerCredible(0.80))
+	}
+	for i := 1; i < len(bounds); i++ {
+		if bounds[i] < bounds[i-1]-0.001 { // small tolerance for floating point
+			t.Fatalf("lower bound decreased at step %d: %g -> %g", i, bounds[i-1], bounds[i])
+		}
+	}
+}
+
 func TestReputationDB_MixedOutcomes(t *testing.T) {
 	db := NewReputationDB()
 	creator := "MixedCreator1111111111111111111111111111111"

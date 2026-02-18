@@ -9,4 +9,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /sniper ./cmd/sniper
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /sniper /sniper
+COPY models/ /models/
+ENV SURVIVAL_MODEL_PATH=/models/survival_model.json
 CMD ["/sniper"]

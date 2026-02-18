@@ -76,12 +76,23 @@ type Config struct {
 	DynamicPositionLimits    bool    `envconfig:"DYNAMIC_POSITION_LIMITS" default:"false"`
 	PositionScaleFactor      float64 `envconfig:"POSITION_SCALE_FACTOR" default:"3.0"`
 
-	// Auto gas refueling
+	// Liquidity-aware sizing: cap entry size so we don't move the bonding curve too much.
+	MaxTradeImpactPct        float64 `envconfig:"MAX_TRADE_IMPACT_PCT" default:"2.0"`
+
+	// Auto gas refueling (sells worst position when gas runs low)
 	GasRefuelEnabled         bool    `envconfig:"GAS_REFUEL_ENABLED" default:"false"`
 	GasRefuelThreshold       float64 `envconfig:"GAS_REFUEL_THRESHOLD" default:"0.0015"`
-	GasRefuelAmount          float64 `envconfig:"GAS_REFUEL_AMOUNT" default:"0.05"`
 	GasRefuelCooldownMin     int     `envconfig:"GAS_REFUEL_COOLDOWN_MIN" default:"5"`
-	USDCMint                 string  `envconfig:"USDC_MINT" default:"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"`
+
+	// Quantitative selection engine
+	MinLiquidityVelocity     float64 `envconfig:"MIN_LIQUIDITY_VELOCITY" default:"0.05"`
+	MaxOFIDeceleration       float64 `envconfig:"MAX_OFI_DECELERATION" default:"-0.3"`
+	PreGradExitProgress      float64 `envconfig:"PRE_GRADUATION_EXIT_PROGRESS" default:"0.90"`
+	CUSUMEnabled             bool    `envconfig:"CUSUM_ENABLED" default:"true"`
+	AdaptiveObservation      bool    `envconfig:"ADAPTIVE_OBSERVATION" default:"false"`
+	ObservationMaxSecs       int     `envconfig:"OBSERVATION_MAX_SECS" default:"10"`
+	SurvivalModelPath        string  `envconfig:"SURVIVAL_MODEL_PATH"`
+	ThompsonSamplingEnabled  bool    `envconfig:"THOMPSON_SAMPLING_ENABLED" default:"false"`
 
 	// Bot dump exploitation (Phase 3D)
 	BotDumpDelayEnabled bool `envconfig:"BOT_DUMP_DELAY_ENABLED" default:"false"`
@@ -95,6 +106,14 @@ type Config struct {
 	// Wallet rotation (Phase 2B)
 	WalletRotationEnabled bool   `envconfig:"WALLET_ROTATION_ENABLED" default:"false"`
 	SolanaPrivateKeys     string `envconfig:"SOLANA_PRIVATE_KEYS"` // comma-separated (first is primary)
+
+	// Capital sweep — move excess idle SOL to a protected address
+	BankAddress        string  `envconfig:"BANK_ADDRESS"`
+	SweepReserveSOL    float64 `envconfig:"SWEEP_RESERVE_SOL" default:"10"`
+	SweepIdleThreshold float64 `envconfig:"SWEEP_IDLE_THRESHOLD" default:"0.3"`
+	SweepIdleMinutes   int     `envconfig:"SWEEP_IDLE_MINUTES" default:"60"`
+	SweepCooldownMin   int     `envconfig:"SWEEP_COOLDOWN_MIN" default:"10"`
+	SweepMinSOL        float64 `envconfig:"SWEEP_MIN_SOL" default:"0.5"`
 
 	// State persistence
 	StateSnapshotPath string `envconfig:"STATE_SNAPSHOT_PATH" default:"state.json"`

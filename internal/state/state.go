@@ -46,6 +46,13 @@ type Position struct {
 	EntryHeat       float64        `json:"entry_heat,omitempty"`    // heat level at time of buy (0.0-1.0)
 	BotBuyCount     int            `json:"bot_buy_count,omitempty"` // bot buys detected during observation
 
+	// Quantitative signals (Quant Selection Engine).
+	LiquidityVelocity float64 `json:"liquidity_velocity,omitempty"` // net SOL per trade during observation
+	OFIAcceleration   float64 `json:"ofi_acceleration,omitempty"`   // OFI trend (positive=increasing buys)
+	TradeEntropy      float64 `json:"trade_entropy,omitempty"`      // Shannon entropy of trade sizes
+	CurveProgress     float64 `json:"curve_progress,omitempty"`     // 0.0-1.0 bonding curve position at entry
+	MaxTradeSize      float64 `json:"max_trade_size,omitempty"`     // largest single buy during observation
+
 	// Outcome attribution: set when position closes.
 	ExitReason   string        `json:"exit_reason,omitempty"`
 	HoldDuration time.Duration `json:"hold_duration,omitempty"`

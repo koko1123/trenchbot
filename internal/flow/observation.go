@@ -4,6 +4,8 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"github.com/cindocode/trenchbot/internal/curve"
 )
 
 type trade struct {
@@ -16,8 +18,10 @@ type trade struct {
 // Observer collects trade events during a pre-buy observation window
 // and computes aggregate signals for token quality assessment.
 type Observer struct {
-	mu     sync.Mutex
-	trades []trade
+	mu       sync.Mutex
+	trades   []trade
+	anomaly  *TokenAnomalyDetector // CUSUM anomaly detector fed in real time
+	anomalySig AnomalySignal       // accumulated anomaly signals
 }
 
 // ObservationResult holds the computed signals from an observation window.
@@ -37,22 +41,50 @@ type ObservationResult struct {
 	RoundAmountCount int     // buys of exactly 0.1, 0.5, 1.0 SOL (±0.001 tolerance)
 	BotSniped        bool    // true if BotBuyCount > 2
 	SuggestDelay     bool    // true if bot activity detected and delayed entry is recommended
+
+	// Quantitative signals (Phase: Quant Selection Engine).
+	LiquidityVelocity float64 // net SOL per trade — strongest graduation predictor
+	OFIAcceleration   float64 // second-half OFI minus first-half OFI
+	TradeEntropy      float64 // Shannon entropy of trade size distribution (log-scale buckets)
+	CurveProgress     float64 // 0.0-1.0 bonding curve graduation progress
+	MaxTradeSize      float64 // largest single buy in SOL
+
+	// CUSUM anomaly detection (Phase 3).
+	AnomalyDetected bool          // true if any anomaly fired during observation
+	AnomalySignal   AnomalySignal // which specific anomalies were detected
 }
 
 func NewObserver() *Observer {
-	return &Observer{}
+	return &Observer{
+		anomaly: NewTokenAnomalyDetector(),
+	}
 }
 
 // RecordTrade records a single trade event with its timestamp.
 func (o *Observer) RecordTrade(txType string, solAmount float64, mcapSol float64) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	now := time.Now()
 	o.trades = append(o.trades, trade{
 		txType:    txType,
 		solAmount: solAmount,
 		mcapSol:   mcapSol,
-		ts:        time.Now(),
+		ts:        now,
 	})
+
+	// Feed into CUSUM anomaly detector in real time.
+	if o.anomaly != nil {
+		sig := o.anomaly.Feed(txType, solAmount, now)
+		if sig.SellOnset {
+			o.anomalySig.SellOnset = true
+		}
+		if sig.BuyCollapse {
+			o.anomalySig.BuyCollapse = true
+		}
+		if sig.SizeShift {
+			o.anomalySig.SizeShift = true
+		}
+	}
 }
 
 // Result computes all derived metrics from the raw trade data.
@@ -124,7 +156,112 @@ func (o *Observer) Result() ObservationResult {
 	// Bots typically dump within 30-120s of buying, so delaying entry lets us buy post-dump.
 	res.SuggestDelay = res.BotSniped || (res.BotBuyCount >= 2 && res.RoundAmountCount >= 2)
 
+	// Liquidity velocity: net SOL per trade. Academic research shows this is the
+	// single strongest predictor of token graduation on PumpFun.
+	if res.TradeCount > 0 {
+		res.LiquidityVelocity = (res.BuyVolSOL - res.SellVolSOL) / float64(res.TradeCount)
+	}
+
+	// OFI acceleration: compare first-half vs second-half OFI.
+	// Positive = buying pressure increasing; negative = fading.
+	res.OFIAcceleration = ofiAcceleration(o.trades)
+
+	// Trade entropy: Shannon entropy of trade size distribution.
+	// Low = coordinated (all same size), high = diverse organic buyers.
+	res.TradeEntropy = tradeEntropy(o.trades)
+
+	// Bonding curve progress from final mcap observation.
+	if res.EndMcapSOL > 0 {
+		res.CurveProgress = curve.Progress(res.EndMcapSOL)
+	}
+
+	// Max single buy.
+	for _, t := range o.trades {
+		if t.txType == "buy" && t.solAmount > res.MaxTradeSize {
+			res.MaxTradeSize = t.solAmount
+		}
+	}
+
+	// CUSUM anomaly detection results.
+	res.AnomalySignal = o.anomalySig
+	res.AnomalyDetected = o.anomalySig.Any()
+
 	return res
+}
+
+// ofiAcceleration computes the difference between second-half and first-half OFI.
+func ofiAcceleration(trades []trade) float64 {
+	n := len(trades)
+	if n < 4 {
+		return 0
+	}
+	mid := n / 2
+
+	computeOFI := func(subset []trade) float64 {
+		var buyVol, sellVol float64
+		for _, t := range subset {
+			if t.txType == "buy" {
+				buyVol += t.solAmount
+			} else if t.txType == "sell" {
+				sellVol += t.solAmount
+			}
+		}
+		total := buyVol + sellVol
+		if total <= 0 {
+			return 0
+		}
+		return (buyVol - sellVol) / total
+	}
+
+	firstHalf := computeOFI(trades[:mid])
+	secondHalf := computeOFI(trades[mid:])
+	return secondHalf - firstHalf
+}
+
+// tradeEntropy computes the Shannon entropy of trade sizes using log-scale buckets.
+func tradeEntropy(trades []trade) float64 {
+	if len(trades) < 2 {
+		return 0
+	}
+
+	// Discretize into log-scale buckets: <0.01, 0.01-0.1, 0.1-0.5, 0.5-1, 1-5, >5 SOL.
+	buckets := make(map[int]int)
+	total := 0
+	for _, t := range trades {
+		if t.txType != "buy" {
+			continue
+		}
+		var bucket int
+		switch {
+		case t.solAmount < 0.01:
+			bucket = 0
+		case t.solAmount < 0.1:
+			bucket = 1
+		case t.solAmount < 0.5:
+			bucket = 2
+		case t.solAmount < 1.0:
+			bucket = 3
+		case t.solAmount < 5.0:
+			bucket = 4
+		default:
+			bucket = 5
+		}
+		buckets[bucket]++
+		total++
+	}
+
+	if total == 0 {
+		return 0
+	}
+
+	entropy := 0.0
+	for _, count := range buckets {
+		p := float64(count) / float64(total)
+		if p > 0 {
+			entropy -= p * math.Log2(p)
+		}
+	}
+	return entropy
 }
 
 // interTradeCV computes the coefficient of variation (stddev / mean) of the

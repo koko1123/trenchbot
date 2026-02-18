@@ -97,6 +97,42 @@ func (s *ReportStore) createTables(ctx context.Context) error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_reports_period ON reports (period, period_start);
+
+		CREATE TABLE IF NOT EXISTS token_observations (
+			id                  TEXT PRIMARY KEY,
+			token_address       TEXT NOT NULL,
+			token_symbol        TEXT NOT NULL,
+			chain               TEXT NOT NULL,
+			shadow              BOOLEAN NOT NULL DEFAULT true,
+
+			liquidity_velocity  DOUBLE PRECISION,
+			ofi                 DOUBLE PRECISION,
+			ofi_acceleration    DOUBLE PRECISION,
+			trade_entropy       DOUBLE PRECISION,
+			timing_cv           DOUBLE PRECISION,
+			bot_buy_count       INT,
+			buy_count           INT,
+			curve_progress      DOUBLE PRECISION,
+			filter_score        INT,
+
+			growth_rate         DOUBLE PRECISION,
+			max_trade_size      DOUBLE PRECISION,
+			trade_count         INT,
+			sell_count          INT,
+			entry_heat          DOUBLE PRECISION,
+			entry_mcap_sol      DOUBLE PRECISION,
+			entry_size_sol      DOUBLE PRECISION,
+
+			hold_duration_sec   DOUBLE PRECISION,
+			pnl_pct             DOUBLE PRECISION,
+			exit_reason         TEXT,
+			peak_mult           DOUBLE PRECISION,
+			observed_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			closed_at           TIMESTAMPTZ
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_token_obs_chain ON token_observations (chain, observed_at);
+		CREATE INDEX IF NOT EXISTS idx_token_obs_exit ON token_observations (exit_reason, closed_at);
 	`)
 	return err
 }
@@ -185,6 +221,68 @@ func (s *ReportStore) QueryAllTrades(ctx context.Context, since, until time.Time
 		trades = append(trades, t)
 	}
 	return trades, rows.Err()
+}
+
+// TokenObservation holds the features and outcome for a single token entry.
+type TokenObservation struct {
+	ID           string
+	TokenAddress string
+	TokenSymbol  string
+	Chain        string
+	Shadow       bool
+
+	// Survival model features (written at entry).
+	LiquidityVelocity float64
+	OFI               float64
+	OFIAcceleration   float64
+	TradeEntropy      float64
+	TimingCV          float64
+	BotBuyCount       int
+	BuyCount          int
+	CurveProgress     float64
+	FilterScore       int
+
+	// Secondary signals.
+	GrowthRate   float64
+	MaxTradeSize float64
+	TradeCount   int
+	SellCount    int
+	EntryHeat    float64
+	EntryMcapSOL float64
+	EntrySizeSOL float64
+}
+
+// InsertObservation writes a token observation at buy time (outcome fields are NULL).
+func (s *ReportStore) InsertObservation(ctx context.Context, obs TokenObservation) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO token_observations (
+			id, token_address, token_symbol, chain, shadow,
+			liquidity_velocity, ofi, ofi_acceleration, trade_entropy, timing_cv,
+			bot_buy_count, buy_count, curve_progress, filter_score,
+			growth_rate, max_trade_size, trade_count, sell_count, entry_heat,
+			entry_mcap_sol, entry_size_sol
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+		ON CONFLICT (id) DO NOTHING
+	`, obs.ID, obs.TokenAddress, obs.TokenSymbol, obs.Chain, obs.Shadow,
+		obs.LiquidityVelocity, obs.OFI, obs.OFIAcceleration, obs.TradeEntropy, obs.TimingCV,
+		obs.BotBuyCount, obs.BuyCount, obs.CurveProgress, obs.FilterScore,
+		obs.GrowthRate, obs.MaxTradeSize, obs.TradeCount, obs.SellCount, obs.EntryHeat,
+		obs.EntryMcapSOL, obs.EntrySizeSOL)
+	return err
+}
+
+// CloseObservation fills in the outcome when a position closes.
+func (s *ReportStore) CloseObservation(ctx context.Context, positionID string, holdDurationSec, pnlPct, peakMult float64, exitReason string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE token_observations
+		SET hold_duration_sec = $2,
+		    pnl_pct = $3,
+		    peak_mult = $4,
+		    exit_reason = $5,
+		    closed_at = NOW()
+		WHERE id = $1
+	`, positionID, holdDurationSec, pnlPct, peakMult, exitReason)
+	return err
 }
 
 // UpsertTokenCreator stores a token's creator in the shared tokens table.
