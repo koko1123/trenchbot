@@ -103,6 +103,7 @@ func (s *FourMemeScanner) Scan(ctx context.Context, out chan<- NewToken) error {
 	ticker := time.NewTicker(s.pollInterval)
 	defer ticker.Stop()
 
+	var backoff time.Duration
 	for {
 		select {
 		case <-ctx.Done():
@@ -110,9 +111,16 @@ func (s *FourMemeScanner) Scan(ctx context.Context, out chan<- NewToken) error {
 		case <-ticker.C:
 			tokens, err := s.pollNewTokens(ctx, s.proxyContract)
 			if err != nil {
-				s.log.Warn("four.meme poll error", "err", err)
+				if backoff == 0 {
+					backoff = s.pollInterval
+				} else {
+					backoff = min(backoff*2, 60*time.Second)
+				}
+				s.log.Warn("four.meme poll error", "err", err, "backoff", backoff)
+				time.Sleep(backoff)
 				continue
 			}
+			backoff = 0
 			for _, t := range tokens {
 				if _, ok := seen[t.Address]; ok {
 					continue

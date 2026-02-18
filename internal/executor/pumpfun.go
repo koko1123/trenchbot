@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/cindocode/trenchbot/internal/state"
@@ -15,19 +16,31 @@ import (
 )
 
 type PumpFunExecutor struct {
-	tradeURL string
-	client   *solanaclient.Client
-	http     *http.Client
-	log      *slog.Logger
+	tradeURL       string
+	jupiterBaseURL string
+	client         *solanaclient.Client
+	http           *http.Client
+	slippage       int
+	log            *slog.Logger
 }
 
-func NewPumpFunExecutor(tradeURL string, solClient *solanaclient.Client, log *slog.Logger) *PumpFunExecutor {
-	return &PumpFunExecutor{
-		tradeURL: tradeURL,
-		client:   solClient,
-		http:     &http.Client{Timeout: 30 * time.Second},
-		log:      log,
+func NewPumpFunExecutor(tradeURL string, solClient *solanaclient.Client, slippage int, log *slog.Logger) *PumpFunExecutor {
+	if slippage <= 0 {
+		slippage = 25
 	}
+	return &PumpFunExecutor{
+		tradeURL:       tradeURL,
+		jupiterBaseURL: "https://api.jup.ag",
+		client:         solClient,
+		http:           &http.Client{Timeout: 30 * time.Second},
+		slippage:       slippage,
+		log:            log,
+	}
+}
+
+// SetJupiterBaseURL overrides the Jupiter API base URL (for testing).
+func (e *PumpFunExecutor) SetJupiterBaseURL(url string) {
+	e.jupiterBaseURL = url
 }
 
 func (e *PumpFunExecutor) Chain() state.Chain {
@@ -50,18 +63,30 @@ const solanaGasCost = 0.000505 // SOL
 
 func (e *PumpFunExecutor) Buy(ctx context.Context, params BuyParams) BuyResult {
 	if params.Shadow {
+		// Fetch real price for shadow mode so exit logic works.
+		price, err := e.CurrentPrice(ctx, params.TokenAddress)
+		if err != nil || price <= 0 {
+			price = 1.0 // fallback for brand-new tokens not yet on Jupiter
+		}
+		tokenAmount := 0.0
+		if price > 0 {
+			tokenAmount = params.Amount / price
+		}
+
 		e.log.Info("SHADOW BUY",
 			"chain", "solana",
 			"token", params.TokenAddress,
 			"symbol", params.TokenSymbol,
 			"amount_sol", params.Amount,
+			"price", price,
 		)
 		return BuyResult{
-			Success: true,
-			TxHash:  "shadow-" + SafePrefix(params.TokenAddress, 8),
-			Price:   1.0,
-			Amount:  params.Amount,
-			GasCost: solanaGasCost,
+			Success:     true,
+			TxHash:      "shadow-" + SafePrefix(params.TokenAddress, 8),
+			Price:       price,
+			Amount:      params.Amount,
+			TokenAmount: tokenAmount,
+			GasCost:     solanaGasCost,
 		}
 	}
 
@@ -71,7 +96,7 @@ func (e *PumpFunExecutor) Buy(ctx context.Context, params BuyParams) BuyResult {
 		Mint:             params.TokenAddress,
 		Amount:           params.Amount,
 		DenominatedInSol: "true",
-		Slippage:         25,
+		Slippage:         e.slippage,
 		PriorityFee:      0.0005,
 		Pool:             "auto",
 	}
@@ -82,46 +107,68 @@ func (e *PumpFunExecutor) Buy(ctx context.Context, params BuyParams) BuyResult {
 		return BuyResult{Error: err}
 	}
 
+	// Fetch actual price after buy to track position correctly.
+	price, priceErr := e.CurrentPrice(ctx, params.TokenAddress)
+	if priceErr != nil || price <= 0 {
+		price = 1.0 // fallback
+	}
+	tokenAmount := 0.0
+	if price > 0 {
+		tokenAmount = params.Amount / price
+	}
+
 	e.log.Info("BUY executed",
 		"chain", "solana",
 		"token", params.TokenAddress,
 		"symbol", params.TokenSymbol,
 		"tx", result,
 		"amount_sol", params.Amount,
+		"price", price,
 	)
 
 	return BuyResult{
-		Success: true,
-		TxHash:  result,
-		Price:   1.0,
-		Amount:  params.Amount,
-		GasCost: solanaGasCost,
+		Success:     true,
+		TxHash:      result,
+		Price:       price,
+		Amount:      params.Amount,
+		TokenAmount: tokenAmount,
+		GasCost:     solanaGasCost,
 	}
 }
 
 func (e *PumpFunExecutor) Sell(ctx context.Context, params SellParams) SellResult {
+	// Compute actual token amount from balance and percentage.
+	tokenAmount := params.TokenBalance * (params.AmountPct / 100.0)
+
 	if params.Shadow {
+		price, _ := e.CurrentPrice(ctx, params.TokenAddress)
 		e.log.Info("SHADOW SELL",
 			"chain", "solana",
 			"token", params.TokenAddress,
 			"symbol", params.TokenSymbol,
 			"pct", params.AmountPct,
+			"token_amount", tokenAmount,
 		)
 		return SellResult{
 			Success: true,
 			TxHash:  "shadow-sell-" + SafePrefix(params.TokenAddress, 8),
+			Price:   price,
 			GasCost: solanaGasCost,
 		}
 	}
 
-	// For sells, amount is percentage of tokens (as token amount, not SOL)
+	slippage := e.slippage
+	if params.MaxSlippage > 0 {
+		slippage = params.MaxSlippage
+	}
+
 	req := pumpTradeRequest{
 		PublicKey:        e.client.PublicKey(),
 		Action:           "sell",
 		Mint:             params.TokenAddress,
-		Amount:           params.AmountPct,
+		Amount:           tokenAmount,
 		DenominatedInSol: "false",
-		Slippage:         25,
+		Slippage:         slippage,
 		PriorityFee:      0.0005,
 		Pool:             "auto",
 	}
@@ -132,25 +179,121 @@ func (e *PumpFunExecutor) Sell(ctx context.Context, params SellParams) SellResul
 		return SellResult{Error: err}
 	}
 
+	// Get current price for PnL tracking.
+	price, _ := e.CurrentPrice(ctx, params.TokenAddress)
+
 	e.log.Info("SELL executed",
 		"chain", "solana",
 		"token", params.TokenAddress,
 		"symbol", params.TokenSymbol,
 		"tx", result,
+		"token_amount", tokenAmount,
 	)
 
 	return SellResult{
 		Success: true,
 		TxHash:  result,
+		Price:   price,
 		GasCost: solanaGasCost,
 	}
 }
 
-func (e *PumpFunExecutor) CurrentPrice(_ context.Context, _ string) (float64, error) {
-	// TODO: Implement price feed using Jupiter API or Solana RPC bonding curve query.
-	// For now, PumpFun tokens use normalized pricing (entry = 1.0).
-	// The monitor requires an external price update mechanism.
-	return 0, fmt.Errorf("price feed not yet implemented for PumpFun")
+// pumpFunCoinResponse is the response from PumpFun's coin data API.
+type pumpFunCoinResponse struct {
+	UsdMarketCap       float64 `json:"usd_market_cap"`
+	VirtualSolReserves float64 `json:"virtual_sol_reserves"`
+	VirtualTokenRes    float64 `json:"virtual_token_reserves"`
+	Complete           bool    `json:"complete"` // true = graduated to Raydium
+}
+
+// jupiterPriceResponse is the response from Jupiter Price API v2.
+type jupiterPriceResponse struct {
+	Data map[string]struct {
+		Price string `json:"price"`
+	} `json:"data"`
+}
+
+// CurrentPrice returns the current USD price for a token. It tries the PumpFun
+// bonding curve API first (works for pre-graduation tokens), falling back to
+// Jupiter Price API for graduated tokens.
+func (e *PumpFunExecutor) CurrentPrice(ctx context.Context, tokenAddress string) (float64, error) {
+	// Try PumpFun API first (works for pre-graduation tokens).
+	price, err := e.pumpFunPrice(ctx, tokenAddress)
+	if err == nil && price > 0 {
+		return price, nil
+	}
+
+	// Fall back to Jupiter for graduated tokens.
+	return e.jupiterPrice(ctx, tokenAddress)
+}
+
+func (e *PumpFunExecutor) pumpFunPrice(ctx context.Context, tokenAddress string) (float64, error) {
+	url := fmt.Sprintf("https://frontend-api-v3.pump.fun/coins/%s", tokenAddress)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("creating pumpfun price request: %w", err)
+	}
+
+	resp, err := e.http.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("fetching pumpfun price: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("pumpfun API returned status %d", resp.StatusCode)
+	}
+
+	var coin pumpFunCoinResponse
+	if err := json.NewDecoder(resp.Body).Decode(&coin); err != nil {
+		return 0, fmt.Errorf("decoding pumpfun response: %w", err)
+	}
+
+	// Compute price from bonding curve reserves (in lamports → SOL → USD).
+	if coin.VirtualTokenRes > 0 && coin.VirtualSolReserves > 0 {
+		// Reserves are in lamports (1e9 per SOL) and smallest token units.
+		// Price per token in SOL = virtualSolReserves / virtualTokenReserves
+		// We use usd_market_cap as a simpler proxy since PumpFun provides it directly.
+		if coin.UsdMarketCap > 0 {
+			return coin.UsdMarketCap, nil
+		}
+	}
+
+	return 0, fmt.Errorf("pumpfun: no price data for %s", SafePrefix(tokenAddress, 12))
+}
+
+func (e *PumpFunExecutor) jupiterPrice(ctx context.Context, tokenAddress string) (float64, error) {
+	url := fmt.Sprintf("%s/price/v2?ids=%s", e.jupiterBaseURL, tokenAddress)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("creating jupiter price request: %w", err)
+	}
+
+	resp, err := e.http.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("fetching jupiter price: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("jupiter price API returned status %d", resp.StatusCode)
+	}
+
+	var result jupiterPriceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("decoding jupiter price response: %w", err)
+	}
+
+	data, ok := result.Data[tokenAddress]
+	if !ok {
+		return 0, fmt.Errorf("token %s not found in jupiter response", SafePrefix(tokenAddress, 12))
+	}
+
+	price, err := strconv.ParseFloat(data.Price, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing jupiter price %q: %w", data.Price, err)
+	}
+	return price, nil
 }
 
 func (e *PumpFunExecutor) sendTrade(ctx context.Context, trade pumpTradeRequest) (string, error) {

@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/cindocode/trenchbot/internal/notify"
 	"github.com/cindocode/trenchbot/internal/scanner"
+	"github.com/cindocode/trenchbot/internal/state"
 )
 
 // CreatorLookup provides creator rug history from the database.
@@ -71,18 +73,6 @@ func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
 
 	approved := score >= f.minScore
 
-	// Honeypot check (only for approved tokens to avoid wasting API calls).
-	if approved && f.honeypotChecker != nil {
-		safe, hpReasons, err := f.honeypotChecker.Check(ctx, token.Chain, token.Address)
-		if err != nil {
-			f.log.Warn("honeypot check error (failing open)", "token", token.Address, "err", err)
-		}
-		if !safe {
-			approved = false
-			reasons = append(reasons, hpReasons...)
-		}
-	}
-
 	result := Result{
 		Token:    token,
 		Score:    score,
@@ -102,6 +92,29 @@ func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
 	return result
 }
 
+// CheckHoneypotAsync runs the GoPlus honeypot check asynchronously. If the
+// token is flagged as a honeypot, the position is force-closed and the notifier
+// is alerted. Designed to be called in a goroutine after the buy has executed.
+func (f *Filter) CheckHoneypotAsync(ctx context.Context, chain state.Chain, tokenAddress string, positionID string, store *state.Store, notifier notify.Notifier, log *slog.Logger) {
+	if f.honeypotChecker == nil {
+		return
+	}
+
+	safe, reasons, err := f.honeypotChecker.Check(ctx, chain, tokenAddress)
+	if err != nil {
+		log.Debug("honeypot check error (failing open)", "token", tokenAddress, "err", err)
+		return
+	}
+	if !safe {
+		log.Warn("honeypot detected, force-closing position", "token", tokenAddress, "reasons", reasons)
+		store.UpdatePosition(positionID, func(p *state.Position) {
+			p.Closed = true
+			p.PnL = -100.0
+		})
+		notifier.Exit(ctx, string(chain), "", tokenAddress, -100.0, "honeypot-detected")
+	}
+}
+
 func (f *Filter) scoreMetadata(token scanner.NewToken) (int, []string) {
 	score := 0
 	var reasons []string
@@ -115,8 +128,12 @@ func (f *Filter) scoreMetadata(token scanner.NewToken) (int, []string) {
 		reasons = append(reasons, "has symbol (+5)")
 	}
 	if token.Description != "" && len(token.Description) > 10 {
-		score += 10
-		reasons = append(reasons, "has description (+10)")
+		score += 5
+		reasons = append(reasons, "has description (+5)")
+		if len(token.Description) > 50 {
+			score += 5
+			reasons = append(reasons, "detailed description (+5)")
+		}
 	}
 	if token.ImageURL != "" {
 		score += 5
@@ -173,9 +190,16 @@ func (f *Filter) scoreMomentum(token scanner.NewToken) (int, []string) {
 
 	if initialBuy, ok := token.Metadata["initialBuy"]; ok {
 		if buy, ok := initialBuy.(float64); ok && buy > 0 {
-			score += 10
-			reasons = append(reasons, "has initial buy (+10)")
-			_ = buy
+			score += 5
+			reasons = append(reasons, "has initial buy (+5)")
+			if buy > 0.5 {
+				score += 5
+				reasons = append(reasons, "initial buy > 0.5 SOL (+5)")
+			}
+			if buy > 1.0 {
+				score += 5
+				reasons = append(reasons, "initial buy > 1.0 SOL (+5)")
+			}
 		}
 	}
 
@@ -188,9 +212,16 @@ func (f *Filter) scoreChainSpecific(token scanner.NewToken) (int, []string) {
 
 	if mcapSol, ok := token.Metadata["marketCapSol"]; ok {
 		if mc, ok := mcapSol.(float64); ok && mc > 0 {
-			score += 10
-			reasons = append(reasons, "bonding curve active (+10)")
-			_ = mc
+			score += 5
+			reasons = append(reasons, "bonding curve active (+5)")
+			if mc > 10 {
+				score += 5
+				reasons = append(reasons, "mcap > 10 SOL (+5)")
+			}
+			if mc > 30 {
+				score += 5
+				reasons = append(reasons, "mcap > 30 SOL (+5)")
+			}
 		}
 	}
 

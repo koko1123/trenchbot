@@ -1,6 +1,10 @@
 package state
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -20,7 +24,8 @@ type Position struct {
 	EntryPrice    float64
 	CurrentPrice  float64
 	PeakPrice     float64
-	Amount        float64
+	Amount        float64 // native token amount (SOL or BNB)
+	TokenBalance  float64 // raw token count received from buy
 	EntryTime     time.Time
 	SoldPct       float64 // percentage already sold (0-100)
 	Closed        bool
@@ -28,6 +33,7 @@ type Position struct {
 	EntryGasCost  float64 // gas paid on buy tx (native token)
 	ExitGasCost   float64 // cumulative gas paid on sell tx(s)
 	SellFailures  int     // consecutive sell failures
+	EntryPriceUSD float64 // USD price at entry (set on first price lookup)
 }
 
 type Trade struct {
@@ -208,7 +214,7 @@ func (s *Store) TryReserveSlot(chain Chain, maxPerChain, maxTotal int) bool {
 	chainCount := 0
 	totalCount := 0
 	for _, p := range s.positions {
-		if !p.Closed {
+		if !p.Closed && p.SoldPct < 75 {
 			totalCount++
 			if p.Chain == chain {
 				chainCount++
@@ -249,4 +255,75 @@ func (s *Store) totalReservedSlots() int {
 		total += v
 	}
 	return total
+}
+
+// stateSnapshot is the JSON-serializable form of the store.
+type stateSnapshot struct {
+	Positions  map[string]*Position `json:"positions"`
+	DailyPnL   map[Chain]float64    `json:"daily_pnl"`
+	PeakEquity map[Chain]float64    `json:"peak_equity"`
+	GasBalance map[Chain]float64    `json:"gas_balance"`
+	GasSpent   map[Chain]float64    `json:"gas_spent"`
+}
+
+// SaveSnapshot writes the store to a JSON file atomically.
+func (s *Store) SaveSnapshot(path string) error {
+	s.mu.RLock()
+	snap := stateSnapshot{
+		Positions:  s.positions,
+		DailyPnL:   s.dailyPnL,
+		PeakEquity: s.peakEquity,
+		GasBalance: s.gasBalance,
+		GasSpent:   s.gasSpent,
+	}
+	data, err := json.MarshalIndent(snap, "", "  ")
+	s.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("marshal state: %w", err)
+	}
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename snapshot: %w", err)
+	}
+	return nil
+}
+
+// LoadSnapshot restores the store from a JSON snapshot file.
+// No-op if the file does not exist.
+func (s *Store) LoadSnapshot(path string) error {
+	data, err := os.ReadFile(filepath.Clean(path))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read snapshot: %w", err)
+	}
+
+	var snap stateSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return fmt.Errorf("unmarshal snapshot: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if snap.Positions != nil {
+		s.positions = snap.Positions
+	}
+	if snap.DailyPnL != nil {
+		s.dailyPnL = snap.DailyPnL
+	}
+	if snap.PeakEquity != nil {
+		s.peakEquity = snap.PeakEquity
+	}
+	if snap.GasBalance != nil {
+		s.gasBalance = snap.GasBalance
+	}
+	if snap.GasSpent != nil {
+		s.gasSpent = snap.GasSpent
+	}
+	return nil
 }

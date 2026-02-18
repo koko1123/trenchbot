@@ -40,7 +40,7 @@ func TestEvaluate_FullMetadata(t *testing.T) {
 		},
 	}
 	result := f.Evaluate(context.Background(), token)
-	// metadata: 5+5+10+5=25, creator: 10+5=15, momentum: 5+10+10=25, chain: 10=10 = 75
+	// metadata: 5+5+5+5=20, creator: 10=10, momentum: 5+10+5+5+5=30, chain: 5+5=10 = 70
 	if result.Score < 70 {
 		t.Errorf("full metadata token should score >=70, got %d", result.Score)
 	}

@@ -26,6 +26,7 @@ type FourMemeExecutor struct {
 	proxyContract common.Address
 	contractABI   abi.ABI
 	log           *slog.Logger
+	liveEnabled   bool // set to true once sell path is implemented
 }
 
 func NewFourMemeExecutor(bnbClient *bnbclient.Client, proxyAddr string, log *slog.Logger) (*FourMemeExecutor, error) {
@@ -63,7 +64,9 @@ func (e *FourMemeExecutor) Buy(ctx context.Context, params BuyParams) BuyResult 
 	}
 
 	// Block live buys until sell is implemented to prevent stranded positions.
-	return BuyResult{Error: fmt.Errorf("four.meme live buy blocked: sell not yet implemented")}
+	if !e.liveEnabled {
+		return BuyResult{Error: fmt.Errorf("four.meme live buy blocked: sell not yet implemented")}
+	}
 
 	tokenAddr := common.HexToAddress(params.TokenAddress)
 	amountWei := etherToWei(params.Amount)

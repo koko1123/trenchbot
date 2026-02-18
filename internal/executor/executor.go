@@ -19,16 +19,19 @@ type SellParams struct {
 	TokenAddress string
 	TokenSymbol  string
 	AmountPct    float64 // percentage of position to sell (0-100)
+	TokenBalance float64 // total token balance held (raw token count)
+	MaxSlippage  int     // override slippage for desperate sells (0 = use default)
 	Shadow       bool
 }
 
 type BuyResult struct {
-	Success  bool
-	TxHash   string
-	Price    float64
-	Amount   float64
-	GasCost  float64 // gas paid in native token (SOL or BNB)
-	Error    error
+	Success     bool
+	TxHash      string
+	Price       float64
+	Amount      float64
+	TokenAmount float64 // raw token count received from buy
+	GasCost     float64 // gas paid in native token (SOL or BNB)
+	Error       error
 }
 
 type SellResult struct {

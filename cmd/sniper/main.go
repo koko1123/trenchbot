@@ -194,7 +194,7 @@ func main() {
 		}
 	}()
 
-	if bnbClient != nil {
+	if bnbClient != nil && cfg.BitqueryAPIKey != "" {
 		pollInterval := time.Duration(cfg.BitqueryPollIntervalSec) * time.Second
 		fourScanner := scanner.NewFourMemeScanner(cfg.BitqueryAPIURL, cfg.BitqueryAPIKey, cfg.FourMemeProxyContract, pollInterval, log)
 		wg.Add(1)
@@ -204,6 +204,8 @@ func main() {
 				log.Error("four.meme scanner error", "err", err)
 			}
 		}()
+	} else if bnbClient != nil {
+		log.Info("four.meme scanner disabled (no BITQUERY_API_KEY)")
 	}
 
 	wg.Add(1)
@@ -212,7 +214,8 @@ func main() {
 		mon.Run(ctx)
 	}()
 
-	// Price update goroutine: polls current prices every 10 seconds.
+	// Price update goroutine: polls current USD prices every 10 seconds and
+	// converts to normalized prices relative to entry for the monitor.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -232,12 +235,24 @@ func main() {
 					if !ok {
 						continue
 					}
-					price, err := pf.CurrentPrice(ctx, pos.TokenAddress)
-					if err != nil || price <= 0 {
+					usdPrice, err := pf.CurrentPrice(ctx, pos.TokenAddress)
+					if err != nil || usdPrice <= 0 {
+						log.Debug("price fetch failed", "token", pos.TokenSymbol, "err", err)
 						continue
 					}
 					store.UpdatePosition(pos.ID, func(p *state.Position) {
-						p.CurrentPrice = price
+						// First successful price lookup: record the entry USD price.
+						if p.EntryPriceUSD <= 0 {
+							p.EntryPriceUSD = usdPrice
+						}
+						// Convert USD price to normalized price (relative to entry).
+						// EntryPrice is 1.0, so multiplier = usdPrice / entryUSD.
+						if p.EntryPriceUSD > 0 {
+							p.CurrentPrice = p.EntryPrice * (usdPrice / p.EntryPriceUSD)
+							if p.CurrentPrice > p.PeakPrice {
+								p.PeakPrice = p.CurrentPrice
+							}
+						}
 					})
 				}
 			}
@@ -528,6 +543,10 @@ func processToken(
 	}
 
 	notifier.Snipe(ctx, string(token.Chain), token.Symbol, token.Address, size, buyResult.Price, shadow)
+
+	// Run honeypot check asynchronously after the buy. If the token is flagged,
+	// the position will be force-closed without blocking the pipeline.
+	go f.CheckHoneypotAsync(ctx, token.Chain, token.Address, posID, store, notifier, log)
 }
 
 // calculateEquity computes the current equity for a chain based on open positions.

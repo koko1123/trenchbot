@@ -47,7 +47,19 @@ type Config struct {
 	MinGasReserveBNB float64 `envconfig:"MIN_GAS_RESERVE_BNB" default:"0.002"`
 
 	// Filter
-	MinScoreThreshold int `envconfig:"MIN_SCORE_THRESHOLD" default:"40"`
+	MinScoreThreshold    int  `envconfig:"MIN_SCORE_THRESHOLD" default:"40"`
+	HoneypotCheckEnabled bool `envconfig:"HONEYPOT_CHECK_ENABLED" default:"true"`
+
+	// Execution
+	SlippagePctSOL       int `envconfig:"SLIPPAGE_PCT_SOL" default:"25"`
+	SlippagePctBNB       int `envconfig:"SLIPPAGE_PCT_BNB" default:"25"`
+	MaxConcurrentBuys    int `envconfig:"MAX_CONCURRENT_BUYS" default:"10"`
+
+	// Bitquery polling
+	BitqueryPollIntervalSec int `envconfig:"BITQUERY_POLL_INTERVAL_SEC" default:"2"`
+
+	// State persistence
+	StateSnapshotPath string `envconfig:"STATE_SNAPSHOT_PATH" default:"state.json"`
 
 	// PostgreSQL
 	DatabaseURL string `envconfig:"DATABASE_URL"`

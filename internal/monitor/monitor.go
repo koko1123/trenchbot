@@ -21,8 +21,9 @@ type ExitConfig struct {
 	StopLossPct            float64 // hard stop-loss from entry (e.g. 50%)
 	StaleMinutes           int     // auto-exit if no buys for this many minutes
 	StaleMinutes2          int     // max hold time for sub-tranche1 positions, 0 = disabled
-	EarlyTrailingThreshold float64 // multiplier above which early trailing activates (e.g. 3.0x)
-	EarlyTrailingStop      float64 // % drop from peak to trigger early trailing exit (e.g. 30%)
+	EarlyTrailingThreshold   float64 // multiplier above which early trailing activates (e.g. 3.0x)
+	EarlyTrailingStop        float64 // % drop from peak to trigger early trailing exit (e.g. 30%)
+	StaleMultiplierThreshold float64 // positions above this multiplier are not considered stale (default 1.5)
 }
 
 func DefaultExitConfig() ExitConfig {
@@ -35,8 +36,9 @@ func DefaultExitConfig() ExitConfig {
 		StopLossPct:            50,
 		StaleMinutes:           30,
 		StaleMinutes2:          60,
-		EarlyTrailingThreshold: 3.0,
-		EarlyTrailingStop:      30,
+		EarlyTrailingThreshold:   3.0,
+		EarlyTrailingStop:        30,
+		StaleMultiplierThreshold: 1.5,
 	}
 }
 
@@ -149,7 +151,7 @@ func (m *Monitor) evaluateExit(ctx context.Context, pos *state.Position) {
 	// Stale position exit
 	if m.exitCfg.StaleMinutes > 0 {
 		staleThreshold := time.Duration(m.exitCfg.StaleMinutes) * time.Minute
-		if m.clock.Since(pos.EntryTime) > staleThreshold && multiplier < 1.5 {
+		if m.clock.Since(pos.EntryTime) > staleThreshold && multiplier < m.exitCfg.StaleMultiplierThreshold {
 			m.executeSell(ctx, pos, 100-pos.SoldPct, "stale-position")
 			return
 		}
@@ -177,14 +179,17 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 		TokenAddress: pos.TokenAddress,
 		TokenSymbol:  pos.TokenSymbol,
 		AmountPct:    sellPct,
+		TokenBalance: pos.TokenBalance,
 		Shadow:       m.shadow,
 	})
 
 	if result.Error != nil {
+		// Capture failures inside the closure to avoid data race.
+		var failures int
 		m.store.UpdatePosition(pos.ID, func(p *state.Position) {
 			p.SellFailures++
+			failures = p.SellFailures
 		})
-		failures := pos.SellFailures // already incremented via shared pointer
 		m.log.Error("sell failed",
 			"token", pos.TokenSymbol,
 			"reason", reason,
@@ -194,6 +199,33 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 		// Force-close after 5 consecutive failures (likely honeypot).
 		const maxSellFailures = 5
 		if failures >= maxSellFailures {
+			// Last-ditch attempt with maximum slippage before giving up.
+			lastResult := exec.Sell(ctx, executor.SellParams{
+				Chain:        pos.Chain,
+				TokenAddress: pos.TokenAddress,
+				TokenSymbol:  pos.TokenSymbol,
+				AmountPct:    100 - pos.SoldPct,
+				TokenBalance: pos.TokenBalance,
+				MaxSlippage:  49,
+				Shadow:       m.shadow,
+			})
+			if lastResult.Error == nil {
+				m.log.Info("high-slippage sell succeeded",
+					"token", pos.TokenSymbol,
+					"tx", lastResult.TxHash,
+				)
+				m.store.DeductGas(pos.Chain, lastResult.GasCost)
+				m.store.UpdatePosition(pos.ID, func(p *state.Position) {
+					p.Closed = true
+					p.SoldPct = 100
+					p.TokenBalance = 0
+					p.SellFailures = 0
+					p.PnL = -90.0 // assume near-total loss at max slippage
+				})
+				m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pos.TokenAddress, -90.0, "max-slippage-sell")
+				return
+			}
+
 			m.log.Error("force-closing position after max sell failures",
 				"token", pos.TokenSymbol,
 				"failures", failures,
@@ -215,7 +247,12 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 	if effectiveEntry <= 0 {
 		effectiveEntry = pos.CurrentPrice
 	}
-	rawPnlPct := ((pos.CurrentPrice / effectiveEntry) - 1) * 100
+	// Use actual sell price when available, fall back to current price.
+	sellPrice := pos.CurrentPrice
+	if result.Price > 0 {
+		sellPrice = result.Price
+	}
+	rawPnlPct := ((sellPrice / effectiveEntry) - 1) * 100
 	totalGas := pos.EntryGasCost + result.GasCost
 	gasPctOfPosition := 0.0
 	if pos.Amount > 0 {
@@ -242,10 +279,14 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 		if p.SoldPct > 100 {
 			p.SoldPct = 100
 		}
+		// Reduce token balance proportionally.
+		soldFraction := sellPct / 100.0
+		p.TokenBalance -= p.TokenBalance * soldFraction
 		p.ExitGasCost += result.GasCost
 		p.SellFailures = 0
 		if p.SoldPct >= 100 {
 			p.Closed = true
+			p.TokenBalance = 0
 			p.PnL = pnlPct
 		}
 	})
