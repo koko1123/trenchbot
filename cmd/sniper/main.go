@@ -137,7 +137,7 @@ func main() {
 	store.SetGasBalance(state.ChainBNB, bnbBalance)
 
 	sizer := risk.NewPositionSizer(store, cfg.SolanaSnipeAmount, cfg.BNBSnipeAmount, cfg.DailyLossLimitPct)
-	sizer.SetMaxPositions(5)
+	sizer.SetMaxPositions(cfg.MaxPositionsTotal)
 	sizer.SetGasReserves(cfg.MinGasReserveSOL, cfg.MinGasReserveBNB)
 
 	// Reporter (works with nil reportStore).
@@ -347,23 +347,23 @@ func main() {
 		}
 	}()
 
-	// Midnight daily-reset goroutine: resets daily PnL for circuit breaker.
+	// Hourly PnL reset: allows the bot to recover from bad streaks within the same day.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		resetTicker := time.NewTicker(1 * time.Hour)
+		defer resetTicker.Stop()
 		for {
-			now := time.Now().UTC()
-			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Until(next)):
+			case <-resetTicker.C:
 				store.ResetDailyPnL()
 				solCB.ResetPauseCycles()
 				if bnbCB != nil {
 					bnbCB.ResetPauseCycles()
 				}
-				log.Info("daily PnL reset at midnight UTC")
+				log.Info("hourly PnL reset")
 			}
 		}
 	}()

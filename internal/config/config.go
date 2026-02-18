@@ -31,8 +31,8 @@ type Config struct {
 	BitqueryAPIURL string `envconfig:"BITQUERY_API_URL" default:"https://streaming.bitquery.io/graphql"`
 
 	// Risk
-	MaxPositionsPerChain       int     `envconfig:"MAX_CONCURRENT_POSITIONS_PER_CHAIN" default:"5"`
-	MaxPositionsTotal          int     `envconfig:"MAX_CONCURRENT_POSITIONS_TOTAL" default:"8"`
+	MaxPositionsPerChain       int     `envconfig:"MAX_CONCURRENT_POSITIONS_PER_CHAIN" default:"10"`
+	MaxPositionsTotal          int     `envconfig:"MAX_CONCURRENT_POSITIONS_TOTAL" default:"15"`
 	MaxSnipesPerHour           int     `envconfig:"MAX_SNIPES_PER_HOUR" default:"10"`
 	DailyLossLimitPct          float64 `envconfig:"DAILY_LOSS_LIMIT_PCT" default:"8"`
 	TotalDrawdownLimitPct      float64 `envconfig:"TOTAL_DRAWDOWN_LIMIT_PCT" default:"40"`
