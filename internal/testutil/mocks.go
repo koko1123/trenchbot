@@ -17,6 +17,7 @@ type MockExecutor struct {
 	SellCalls []executor.SellParams
 	BuyFn     func(ctx context.Context, params executor.BuyParams) executor.BuyResult
 	SellFn    func(ctx context.Context, params executor.SellParams) executor.SellResult
+	sellError error
 }
 
 func NewMockExecutor(chain state.Chain) *MockExecutor {
@@ -45,8 +46,12 @@ func (m *MockExecutor) Buy(ctx context.Context, params executor.BuyParams) execu
 func (m *MockExecutor) Sell(ctx context.Context, params executor.SellParams) executor.SellResult {
 	m.mu.Lock()
 	m.SellCalls = append(m.SellCalls, params)
+	sellErr := m.sellError
 	m.mu.Unlock()
 
+	if sellErr != nil {
+		return executor.SellResult{Error: sellErr}
+	}
 	if m.SellFn != nil {
 		return m.SellFn(ctx, params)
 	}
@@ -57,6 +62,12 @@ func (m *MockExecutor) Sell(ctx context.Context, params executor.SellParams) exe
 		Amount:  params.AmountPct,
 		GasCost: 0.000505,
 	}
+}
+
+func (m *MockExecutor) SetSellError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sellError = err
 }
 
 func (m *MockExecutor) GetSellCalls() []executor.SellParams {
@@ -106,9 +117,9 @@ type SnipeRecord struct {
 }
 
 type ExitRecord struct {
-	Chain, Symbol string
-	PnLPct        float64
-	Reason        string
+	Chain, Symbol, TokenAddress string
+	PnLPct                     float64
+	Reason                     string
 }
 
 func NewMockNotifier() *MockNotifier { return &MockNotifier{} }
@@ -125,10 +136,10 @@ func (n *MockNotifier) Snipe(_ context.Context, chain, symbol, token string, amo
 	n.Snipes = append(n.Snipes, SnipeRecord{chain, symbol, token, amount, price, shadow})
 }
 
-func (n *MockNotifier) Exit(_ context.Context, chain, symbol string, pnlPct float64, reason string) {
+func (n *MockNotifier) Exit(_ context.Context, chain, symbol, tokenAddress string, pnlPct float64, reason string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.Exits = append(n.Exits, ExitRecord{chain, symbol, pnlPct, reason})
+	n.Exits = append(n.Exits, ExitRecord{chain, symbol, tokenAddress, pnlPct, reason})
 }
 
 func (n *MockNotifier) DrawdownWarning(_ context.Context, chain string, drawdownPct float64) {

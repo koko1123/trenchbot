@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/cindocode/trenchbot/internal/state"
@@ -14,12 +15,15 @@ import (
 type PumpFunScanner struct {
 	wsURL string
 	log   *slog.Logger
+	mu    sync.Mutex
+	seen  map[string]struct{}
 }
 
 func NewPumpFunScanner(wsURL string, log *slog.Logger) *PumpFunScanner {
 	return &PumpFunScanner{
 		wsURL: wsURL,
 		log:   log,
+		seen:  make(map[string]struct{}),
 	}
 }
 
@@ -68,6 +72,29 @@ func (s *PumpFunScanner) connect(ctx context.Context, out chan<- NewToken) error
 	}
 	s.log.Info("pumpfun scanner connected and subscribed")
 
+	// Set up ping/pong keepalive.
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	// Ping goroutine exits when conn.Close() causes WriteMessage to fail.
+	go func() {
+		pingTicker := time.NewTicker(30 * time.Second)
+		defer pingTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-pingTicker.C:
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -89,6 +116,18 @@ func (s *PumpFunScanner) connect(ctx context.Context, out chan<- NewToken) error
 		if token.Mint == "" {
 			continue
 		}
+
+		s.mu.Lock()
+		if _, already := s.seen[token.Mint]; already {
+			s.mu.Unlock()
+			continue
+		}
+		s.seen[token.Mint] = struct{}{}
+		// Cap seen map to prevent unbounded growth.
+		if len(s.seen) > 10000 {
+			s.seen = make(map[string]struct{})
+		}
+		s.mu.Unlock()
 
 		newToken := NewToken{
 			Chain:        state.ChainSolana,

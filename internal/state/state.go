@@ -27,6 +27,7 @@ type Position struct {
 	PnL           float64
 	EntryGasCost  float64 // gas paid on buy tx (native token)
 	ExitGasCost   float64 // cumulative gas paid on sell tx(s)
+	SellFailures  int     // consecutive sell failures
 }
 
 type Trade struct {
@@ -44,22 +45,24 @@ type Trade struct {
 }
 
 type Store struct {
-	mu         sync.RWMutex
-	positions  map[string]*Position // ID -> Position
-	trades     []Trade
-	dailyPnL   map[Chain]float64
-	peakEquity map[Chain]float64
-	gasBalance map[Chain]float64
-	gasSpent   map[Chain]float64
+	mu            sync.RWMutex
+	positions     map[string]*Position // ID -> Position
+	trades        []Trade
+	dailyPnL      map[Chain]float64
+	peakEquity    map[Chain]float64
+	gasBalance    map[Chain]float64
+	gasSpent      map[Chain]float64
+	reservedSlots map[Chain]int // reserved but not yet filled slots
 }
 
 func NewStore() *Store {
 	return &Store{
-		positions:  make(map[string]*Position),
-		dailyPnL:   make(map[Chain]float64),
-		peakEquity: make(map[Chain]float64),
-		gasBalance: make(map[Chain]float64),
-		gasSpent:   make(map[Chain]float64),
+		positions:     make(map[string]*Position),
+		dailyPnL:      make(map[Chain]float64),
+		peakEquity:    make(map[Chain]float64),
+		gasBalance:    make(map[Chain]float64),
+		gasSpent:      make(map[Chain]float64),
+		reservedSlots: make(map[Chain]int),
 	}
 }
 
@@ -194,4 +197,56 @@ func (s *Store) GetGasSpent(chain Chain) float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.gasSpent[chain]
+}
+
+// TryReserveSlot atomically checks if a slot is available and reserves it.
+// Returns true if the slot was reserved, false if at the limit.
+func (s *Store) TryReserveSlot(chain Chain, maxPerChain, maxTotal int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	chainCount := 0
+	totalCount := 0
+	for _, p := range s.positions {
+		if !p.Closed {
+			totalCount++
+			if p.Chain == chain {
+				chainCount++
+			}
+		}
+	}
+	chainCount += s.reservedSlots[chain]
+	totalCount += s.totalReservedSlots()
+
+	if chainCount >= maxPerChain || totalCount >= maxTotal {
+		return false
+	}
+	s.reservedSlots[chain]++
+	return true
+}
+
+// ReleaseSlot releases a previously reserved slot (e.g., if the buy failed).
+func (s *Store) ReleaseSlot(chain Chain) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reservedSlots[chain] > 0 {
+		s.reservedSlots[chain]--
+	}
+}
+
+// ConsumeSlot converts a reserved slot into an actual position (call after AddPosition).
+func (s *Store) ConsumeSlot(chain Chain) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reservedSlots[chain] > 0 {
+		s.reservedSlots[chain]--
+	}
+}
+
+func (s *Store) totalReservedSlots() int {
+	total := 0
+	for _, v := range s.reservedSlots {
+		total += v
+	}
+	return total
 }

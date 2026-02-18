@@ -13,6 +13,7 @@ type PositionSizer struct {
 	dailyLossLimitPct  float64
 	minGasReserveSOL   float64
 	minGasReserveBNB   float64
+	maxPositions       int
 }
 
 func NewPositionSizer(store *state.Store, defaultSol, defaultBNB, dailyLossLimitPct float64) *PositionSizer {
@@ -29,6 +30,13 @@ func NewPositionSizer(store *state.Store, defaultSol, defaultBNB, dailyLossLimit
 func (ps *PositionSizer) SetGasReserves(solReserve, bnbReserve float64) {
 	ps.minGasReserveSOL = solReserve
 	ps.minGasReserveBNB = bnbReserve
+}
+
+// SetMaxPositions sets the maximum number of concurrent positions used for
+// concentration scaling. When open positions approach this limit the sizer
+// progressively reduces size.
+func (ps *PositionSizer) SetMaxPositions(max int) {
+	ps.maxPositions = max
 }
 
 func (ps *PositionSizer) Size(chain state.Chain, score int) float64 {
@@ -61,7 +69,19 @@ func (ps *PositionSizer) Size(chain state.Chain, score int) float64 {
 		scoreMult = 1.25
 	}
 
-	return base * scoreMult
+	size := base * scoreMult
+
+	// Concentration scaling: reduce size as open positions approach the limit.
+	if ps.maxPositions > 0 {
+		openCount := ps.store.OpenPositionCount(chain)
+		concentrationMult := 1.0 - (float64(openCount)/float64(ps.maxPositions))*0.6
+		if concentrationMult < 0.2 {
+			concentrationMult = 0.2
+		}
+		size *= concentrationMult
+	}
+
+	return size
 }
 
 func (ps *PositionSizer) baseSize(chain state.Chain) float64 {

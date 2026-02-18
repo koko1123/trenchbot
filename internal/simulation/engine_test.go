@@ -101,7 +101,7 @@ func TestPipeline_TokenFlowsThrough(t *testing.T) {
 	_ = monitor.New(store, executors, notif, monitor.DefaultExitConfig(), clk, true, testLog)
 
 	token := highScoreToken()
-	result := filt.Evaluate(token)
+	result := filt.Evaluate(context.Background(), token)
 	if !result.Approved {
 		t.Fatal("high-score token should be approved")
 	}
@@ -125,7 +125,7 @@ func TestPipeline_TokenFlowsThrough(t *testing.T) {
 func TestPipeline_LowScoreRejected(t *testing.T) {
 	filt := filter.New(60, testLog)
 	token := lowScoreToken()
-	result := filt.Evaluate(token)
+	result := filt.Evaluate(context.Background(), token)
 	if result.Approved {
 		t.Errorf("low-score token should be rejected, got score=%d", result.Score)
 	}
@@ -266,6 +266,46 @@ func TestSimulation_FullRun(t *testing.T) {
 	if report.MarketShocks == 0 {
 		t.Log("WARNING: no market shocks fired during simulation")
 	}
+
+	// 12. Slippage cost should be tracked (deterministic: every buy applies slippage)
+	if report.TotalSlippageCost <= 0 {
+		t.Error("slippage tracking broken — no slippage cost recorded")
+	}
+
+	// 13. Front-run cost should be tracked (deterministic: every buy applies MEV)
+	if report.TotalFrontRunCost <= 0 {
+		t.Error("front-run cost tracking broken — no MEV cost recorded")
+	}
+
+	// 14. Gas spike events should fire (shocks trigger gas spikes)
+	if report.GasSpikeEvents == 0 {
+		t.Log("WARNING: no gas spike events fired during simulation")
+	}
+
+	// 15. Rug clusters should be generated (3% prob over 360 tokens)
+	if report.RugClusters == 0 {
+		t.Log("WARNING: no rug clusters generated — check GenerateWithResult()")
+	}
+
+	// 16. Honeypots should exist in archetype results
+	if report.HoneypotCount == 0 {
+		t.Log("WARNING: no honeypot tokens generated")
+	}
+
+	// 17. Sell failures should occur (5% rate over many sells)
+	if report.SellFailures == 0 {
+		t.Log("WARNING: no sell failures recorded — check SellFailureRate")
+	}
+
+	// 18. Re-entry blocking should have kicked in for stop-loss tokens
+	if report.ReEntryBlocked == 0 {
+		t.Log("WARNING: no re-entry blocks recorded")
+	}
+
+	// 19. Early trailing stop should appear in exit reasons
+	if _, ok := report.ExitsByReason["early-trailing-stop"]; !ok {
+		t.Log("WARNING: early-trailing-stop never triggered in full sim")
+	}
 }
 
 func highScoreToken() scanner.NewToken {
@@ -278,6 +318,180 @@ func lowScoreToken() scanner.NewToken {
 	return scanner.NewToken{
 		Chain:   state.ChainSolana,
 		Address: "low_score_token",
+	}
+}
+
+// TestSimulation_October10Crash models the October 10, 2025 tariff crash impact on memecoins.
+// Trump announced 100% tariffs on Chinese imports at ~20:50 UTC.
+// SOL crashed from $229 to $173 (-24.1%) over 29 hours with 32x gas spike.
+// Memecoins crash much harder than the underlying chain: beta is typically 2-4x.
+// A -24% SOL move implies -50% to -80% for memecoins, with many going to zero.
+// We model a -60% memecoin crash (0.4 multiplier) with very slow recovery and 32x gas.
+func TestSimulation_October10Crash(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping crash scenario in short mode")
+	}
+
+	cfg := DefaultSimConfig()
+	cfg.Seed = 1010
+	cfg.SimulatedDuration = 6 * time.Hour
+	cfg.WallClockTimeout = 5 * time.Minute
+	cfg.TokensPerHour = 60
+	cfg.GasSpikeEnabled = true
+
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	engine := NewEngine(cfg, log)
+
+	// Inject a -60% memecoin crash at tick 7200 (2 hours in).
+	// 0.4 multiplier = -60% price drop (memecoins have 2-3x beta vs SOL).
+	// 0.0005 very slow decay (memecoins don't bounce like majors).
+	// 32x gas spike for 5 min (observed on-chain during the Oct 10 panic).
+	report := engine.RunWithShockAt(context.Background(), 7200, 0.4, 0.0005, 32.0)
+
+	t.Log(report.String())
+
+	// The bot should survive — circuit breaker should engage before catastrophic loss.
+	if report.MaxDrawdownPct > 55 {
+		t.Errorf("drawdown %.1f%% exceeded safety margin — circuit breaker should limit to ~50%%", report.MaxDrawdownPct)
+	}
+
+	// Circuit breaker should have halted or paused.
+	if report.CircuitBreakerHalts == 0 && report.CircuitBreakerPauses == 0 {
+		t.Error("circuit breaker should have engaged during -60% memecoin crash")
+	}
+
+	// Gas spike event should have fired.
+	if report.GasSpikeEvents == 0 {
+		t.Error("gas spike should fire during crash scenario")
+	}
+
+	// Bot should not have catastrophic total PnL.
+	if report.TotalPnLPct < -500 {
+		t.Errorf("total PnL %.1f%% is catastrophic — bot did not survive the crash", report.TotalPnLPct)
+	}
+
+	// Write crash report for analysis
+	jsonData, err := report.JSON()
+	if err == nil {
+		os.WriteFile("crash-scenario-report.json", jsonData, 0644)
+	}
+}
+
+func TestSimExecutor_HoneypotSellRevert(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	cfg := DefaultSimConfig()
+	cfg.SellFailureRate = 0 // disable RPC failures to isolate honeypot
+	exec := NewSimExecutor(state.ChainSolana, clk, cfg)
+
+	exec.RegisterCurve("honey1", []PricePoint{{0, 1.0}, {10 * time.Minute, 2.0}})
+	exec.MarkHoneypot("honey1")
+
+	buy := exec.Buy(context.Background(), executor.BuyParams{
+		Chain: state.ChainSolana, TokenAddress: "honey1", Amount: 0.1, Shadow: true,
+	})
+	if !buy.Success {
+		t.Fatal("honeypot buy should succeed")
+	}
+
+	sell := exec.Sell(context.Background(), executor.SellParams{
+		Chain: state.ChainSolana, TokenAddress: "honey1", AmountPct: 100,
+	})
+	if sell.Success {
+		t.Fatal("honeypot sell should always fail")
+	}
+	if sell.GasCost <= 0 {
+		t.Error("honeypot sell should still charge gas")
+	}
+}
+
+func TestSimExecutor_SellRPCFailure(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	cfg := DefaultSimConfig()
+	cfg.SellFailureRate = 1.0 // 100% failure rate for deterministic test
+	exec := NewSimExecutor(state.ChainSolana, clk, cfg)
+
+	exec.RegisterCurve("tok1", []PricePoint{{0, 1.0}, {10 * time.Minute, 2.0}})
+	exec.Buy(context.Background(), executor.BuyParams{
+		Chain: state.ChainSolana, TokenAddress: "tok1", Amount: 0.1, Shadow: true,
+	})
+
+	sell := exec.Sell(context.Background(), executor.SellParams{
+		Chain: state.ChainSolana, TokenAddress: "tok1", AmountPct: 100,
+	})
+	if sell.Success {
+		t.Fatal("sell should fail with 100% failure rate")
+	}
+	if exec.SellFailureCount() != 1 {
+		t.Errorf("expected 1 failure count, got %d", exec.SellFailureCount())
+	}
+}
+
+func TestSimExecutor_SlippageAndFrontRun(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	cfg := DefaultSimConfig()
+	cfg.SlippagePct = 1.0
+	cfg.FrontRunMinPct = 10.0
+	cfg.FrontRunMaxPct = 10.0
+	cfg.PriceNoiseEnabled = false
+	exec := NewSimExecutor(state.ChainSolana, clk, cfg)
+
+	exec.RegisterCurve("tok1", []PricePoint{{0, 1.0}, {10 * time.Minute, 2.0}})
+
+	buy := exec.Buy(context.Background(), executor.BuyParams{
+		Chain: state.ChainSolana, TokenAddress: "tok1", Amount: 0.1, Shadow: true,
+	})
+
+	// Base price is 1.0, with 1% slippage → 1.01, then 10% front-run → 1.01 * 1.10 = 1.111
+	if buy.Price < 1.10 {
+		t.Errorf("buy price %.4f should reflect slippage + front-run (want > 1.10)", buy.Price)
+	}
+}
+
+func TestTokenGenerator_HoneypotArchetype(t *testing.T) {
+	gen := NewTokenGenerator(GeneratorConfig{
+		Seed: 42, TokensPerHour: 200, SimulatedDuration: 1 * time.Hour,
+		Chain: state.ChainSolana,
+	})
+	tokens := gen.Generate()
+
+	honeypotCount := 0
+	for _, tok := range tokens {
+		if tok.Archetype == ArchetypeHoneypot {
+			honeypotCount++
+			if tok.Token.Name == "" || tok.Token.ImageURL == "" {
+				t.Error("honeypot token should have full metadata")
+			}
+		}
+	}
+	if honeypotCount == 0 {
+		t.Error("expected at least 1 honeypot in 200 tokens (3% rate)")
+	}
+}
+
+func TestTokenGenerator_RugClusters(t *testing.T) {
+	gen := NewTokenGenerator(GeneratorConfig{
+		Seed: 42, TokensPerHour: 200, SimulatedDuration: 1 * time.Hour,
+		Chain: state.ChainSolana, RugClusterProb: 0.1, RugClusterSize: 4,
+	})
+	result := gen.GenerateWithResult()
+
+	if result.RugClusters == 0 {
+		t.Error("expected at least 1 rug cluster with 10% probability")
+	}
+
+	creators := make(map[string]int)
+	for _, tok := range result.Tokens {
+		creators[tok.Token.Creator]++
+	}
+	hasCluster := false
+	for _, count := range creators {
+		if count >= 4 {
+			hasCluster = true
+			break
+		}
+	}
+	if !hasCluster {
+		t.Error("expected at least one creator with 4+ tokens (cluster)")
 	}
 }
 

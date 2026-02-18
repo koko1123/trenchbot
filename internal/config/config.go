@@ -49,6 +49,9 @@ type Config struct {
 	// Filter
 	MinScoreThreshold int `envconfig:"MIN_SCORE_THRESHOLD" default:"60"`
 
+	// PostgreSQL
+	DatabaseURL string `envconfig:"DATABASE_URL"`
+
 	// Observability
 	SentryDSN string `envconfig:"SENTRY_DSN"`
 }
@@ -77,5 +80,34 @@ func (c *Config) validate() error {
 			return fmt.Errorf("live mode requires at least one private key")
 		}
 	}
+
+	if c.MaxPositionsPerChain <= 0 {
+		return fmt.Errorf("MAX_CONCURRENT_POSITIONS_PER_CHAIN must be > 0, got %d", c.MaxPositionsPerChain)
+	}
+	if c.MaxPositionsTotal <= 0 {
+		return fmt.Errorf("MAX_CONCURRENT_POSITIONS_TOTAL must be > 0, got %d", c.MaxPositionsTotal)
+	}
+	if c.MaxSnipesPerHour <= 0 {
+		return fmt.Errorf("MAX_SNIPES_PER_HOUR must be > 0, got %d", c.MaxSnipesPerHour)
+	}
+	if c.DailyLossLimitPct <= 0 || c.DailyLossLimitPct > 100 {
+		return fmt.Errorf("DAILY_LOSS_LIMIT_PCT must be in (0, 100], got %g", c.DailyLossLimitPct)
+	}
+	if c.ConsecutiveLossPauseThresh <= 0 {
+		return fmt.Errorf("CONSECUTIVE_LOSS_PAUSE_THRESHOLD must be > 0, got %d", c.ConsecutiveLossPauseThresh)
+	}
+	if c.SolanaSnipeAmount <= 0 && c.BNBSnipeAmount <= 0 {
+		return fmt.Errorf("at least one of SOLANA_SNIPE_AMOUNT_SOL or BNB_SNIPE_AMOUNT_BNB must be > 0")
+	}
+	if c.MinScoreThreshold < 0 || c.MinScoreThreshold > 100 {
+		return fmt.Errorf("MIN_SCORE_THRESHOLD must be in [0, 100], got %d", c.MinScoreThreshold)
+	}
+	if c.GasBudgetSOL > 0 && c.MinGasReserveSOL > 0 && c.GasBudgetSOL < c.MinGasReserveSOL {
+		return fmt.Errorf("GAS_BUDGET_SOL (%g) must be >= MIN_GAS_RESERVE_SOL (%g)", c.GasBudgetSOL, c.MinGasReserveSOL)
+	}
+	if c.GasBudgetBNB > 0 && c.MinGasReserveBNB > 0 && c.GasBudgetBNB < c.MinGasReserveBNB {
+		return fmt.Errorf("GAS_BUDGET_BNB (%g) must be >= MIN_GAS_RESERVE_BNB (%g)", c.GasBudgetBNB, c.MinGasReserveBNB)
+	}
+
 	return nil
 }

@@ -1,6 +1,7 @@
 package risk
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -97,6 +98,38 @@ func TestSize_GasReserveBlock(t *testing.T) {
 	got = ps.Size(state.ChainSolana, 80)
 	if got != 0 {
 		t.Errorf("should refuse to size with low gas, got %f", got)
+	}
+}
+
+func TestSize_ConcentrationScaling(t *testing.T) {
+	store := state.NewStore()
+	store.SetGasBalance(state.ChainSolana, 1.0)
+	ps := NewPositionSizer(store, 0.3, 0.05, 8)
+	ps.SetGasReserves(0.005, 0.002)
+	ps.SetMaxPositions(5)
+
+	// 0 open positions → full size
+	fullSize := ps.Size(state.ChainSolana, 80)
+
+	// Add 3 open positions
+	for i := 0; i < 3; i++ {
+		store.AddPosition(&state.Position{
+			ID:           fmt.Sprintf("p%d", i),
+			Chain:        state.ChainSolana,
+			TokenAddress: fmt.Sprintf("addr%d", i),
+		})
+	}
+
+	// 3/5 open → 1.0 - 0.6*0.6 = 0.64x
+	reducedSize := ps.Size(state.ChainSolana, 80)
+	if reducedSize >= fullSize {
+		t.Errorf("size should decrease with more positions: full=%.4f reduced=%.4f", fullSize, reducedSize)
+	}
+
+	expectedRatio := 0.64 // (1.0 - 3/5 * 0.6)
+	actualRatio := reducedSize / fullSize
+	if actualRatio < expectedRatio-0.05 || actualRatio > expectedRatio+0.05 {
+		t.Errorf("concentration ratio wrong: got %.2f, want ~%.2f", actualRatio, expectedRatio)
 	}
 }
 

@@ -8,39 +8,47 @@ import (
 	"github.com/cindocode/trenchbot/internal/clock"
 	"github.com/cindocode/trenchbot/internal/executor"
 	"github.com/cindocode/trenchbot/internal/notify"
+	"github.com/cindocode/trenchbot/internal/risk"
 	"github.com/cindocode/trenchbot/internal/state"
 )
 
 type ExitConfig struct {
-	Tranche1Pct   float64 // sell this % at Tranche1X
-	Tranche1X     float64 // first exit multiplier (e.g. 2x)
-	Tranche2Pct   float64 // sell this % at Tranche2X
-	Tranche2X     float64 // second exit multiplier (e.g. 5x)
-	TrailingStop  float64 // % drop from peak to exit remaining (e.g. 40%)
-	StopLossPct   float64 // hard stop-loss from entry (e.g. 50%)
-	StaleMinutes  int     // auto-exit if no buys for this many minutes
+	Tranche1Pct            float64 // sell this % at Tranche1X
+	Tranche1X              float64 // first exit multiplier (e.g. 2x)
+	Tranche2Pct            float64 // sell this % at Tranche2X
+	Tranche2X              float64 // second exit multiplier (e.g. 5x)
+	TrailingStop           float64 // % drop from peak to exit remaining (e.g. 40%)
+	StopLossPct            float64 // hard stop-loss from entry (e.g. 50%)
+	StaleMinutes           int     // auto-exit if no buys for this many minutes
+	StaleMinutes2          int     // max hold time for sub-tranche1 positions, 0 = disabled
+	EarlyTrailingThreshold float64 // multiplier above which early trailing activates (e.g. 3.0x)
+	EarlyTrailingStop      float64 // % drop from peak to trigger early trailing exit (e.g. 30%)
 }
 
 func DefaultExitConfig() ExitConfig {
 	return ExitConfig{
-		Tranche1Pct:  25,
-		Tranche1X:    2.0,
-		Tranche2Pct:  50,
-		Tranche2X:    5.0,
-		TrailingStop: 40,
-		StopLossPct:  50,
-		StaleMinutes: 30,
+		Tranche1Pct:            25,
+		Tranche1X:              2.0,
+		Tranche2Pct:            50,
+		Tranche2X:              5.0,
+		TrailingStop:           40,
+		StopLossPct:            50,
+		StaleMinutes:           30,
+		StaleMinutes2:          60,
+		EarlyTrailingThreshold: 3.0,
+		EarlyTrailingStop:      30,
 	}
 }
 
 type Monitor struct {
-	store      *state.Store
-	executors  map[state.Chain]executor.Executor
-	notifier   notify.Notifier
-	exitCfg    ExitConfig
-	clock      clock.Clock
-	log        *slog.Logger
-	shadow     bool
+	store           *state.Store
+	executors       map[state.Chain]executor.Executor
+	notifier        notify.Notifier
+	exitCfg         ExitConfig
+	clock           clock.Clock
+	log             *slog.Logger
+	shadow          bool
+	circuitBreakers map[state.Chain]*risk.CircuitBreaker
 }
 
 func New(store *state.Store, executors map[state.Chain]executor.Executor, notifier notify.Notifier, exitCfg ExitConfig, clk clock.Clock, shadow bool, log *slog.Logger) *Monitor {
@@ -53,6 +61,10 @@ func New(store *state.Store, executors map[state.Chain]executor.Executor, notifi
 		shadow:    shadow,
 		log:       log,
 	}
+}
+
+func (m *Monitor) SetCircuitBreakers(cbs map[state.Chain]*risk.CircuitBreaker) {
+	m.circuitBreakers = cbs
 }
 
 func (m *Monitor) Run(ctx context.Context) {
@@ -77,11 +89,14 @@ func (m *Monitor) CheckPositions(ctx context.Context) {
 }
 
 func (m *Monitor) evaluateExit(ctx context.Context, pos *state.Position) {
-	if pos.CurrentPrice <= 0 || pos.EntryPrice <= 0 {
+	if pos.CurrentPrice <= 0 {
 		return
 	}
-
-	multiplier := pos.CurrentPrice / pos.EntryPrice
+	entryPrice := pos.EntryPrice
+	if entryPrice <= 0 {
+		entryPrice = pos.CurrentPrice // treat as break-even so stops still fire
+	}
+	multiplier := pos.CurrentPrice / entryPrice
 	dropFromPeak := 0.0
 	if pos.PeakPrice > 0 {
 		dropFromPeak = ((pos.PeakPrice - pos.CurrentPrice) / pos.PeakPrice) * 100
@@ -112,7 +127,18 @@ func (m *Monitor) evaluateExit(ctx context.Context, pos *state.Position) {
 		return
 	}
 
-	// Trailing stop on remaining position
+	// Early trailing stop: after tranche-1 but before tranche-2, if peak was high enough
+	if m.exitCfg.EarlyTrailingThreshold > 0 &&
+		pos.SoldPct >= m.exitCfg.Tranche1Pct &&
+		pos.SoldPct < m.exitCfg.Tranche1Pct+m.exitCfg.Tranche2Pct {
+		peakMult := pos.PeakPrice / entryPrice
+		if peakMult >= m.exitCfg.EarlyTrailingThreshold && dropFromPeak >= m.exitCfg.EarlyTrailingStop {
+			m.executeSell(ctx, pos, 100-pos.SoldPct, "early-trailing-stop")
+			return
+		}
+	}
+
+	// Trailing stop on remaining position (after both tranches completed)
 	if pos.SoldPct >= m.exitCfg.Tranche1Pct+m.exitCfg.Tranche2Pct {
 		if dropFromPeak >= m.exitCfg.TrailingStop {
 			m.executeSell(ctx, pos, 100-pos.SoldPct, "trailing-stop")
@@ -125,6 +151,15 @@ func (m *Monitor) evaluateExit(ctx context.Context, pos *state.Position) {
 		staleThreshold := time.Duration(m.exitCfg.StaleMinutes) * time.Minute
 		if m.clock.Since(pos.EntryTime) > staleThreshold && multiplier < 1.5 {
 			m.executeSell(ctx, pos, 100-pos.SoldPct, "stale-position")
+			return
+		}
+	}
+
+	// Extended stale exit: positions below tranche-1 for too long are force-exited.
+	if m.exitCfg.StaleMinutes2 > 0 {
+		staleThreshold2 := time.Duration(m.exitCfg.StaleMinutes2) * time.Minute
+		if m.clock.Since(pos.EntryTime) > staleThreshold2 && multiplier < m.exitCfg.Tranche1X {
+			m.executeSell(ctx, pos, 100-pos.SoldPct, "stale-max-hold")
 			return
 		}
 	}
@@ -146,11 +181,29 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 	})
 
 	if result.Error != nil {
+		m.store.UpdatePosition(pos.ID, func(p *state.Position) {
+			p.SellFailures++
+		})
+		failures := pos.SellFailures // already incremented via shared pointer
 		m.log.Error("sell failed",
 			"token", pos.TokenSymbol,
 			"reason", reason,
 			"err", result.Error,
+			"failures", failures,
 		)
+		// Force-close after 5 consecutive failures (likely honeypot).
+		const maxSellFailures = 5
+		if failures >= maxSellFailures {
+			m.log.Error("force-closing position after max sell failures",
+				"token", pos.TokenSymbol,
+				"failures", failures,
+			)
+			m.store.UpdatePosition(pos.ID, func(p *state.Position) {
+				p.Closed = true
+				p.PnL = -100.0
+			})
+			m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pos.TokenAddress, -100.0, "force-close-honeypot")
+		}
 		return
 	}
 
@@ -158,7 +211,11 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 	m.store.DeductGas(pos.Chain, result.GasCost)
 
 	// Compute P&L adjusted for gas costs (entry gas + exit gas as % of position).
-	rawPnlPct := ((pos.CurrentPrice / pos.EntryPrice) - 1) * 100
+	effectiveEntry := pos.EntryPrice
+	if effectiveEntry <= 0 {
+		effectiveEntry = pos.CurrentPrice
+	}
+	rawPnlPct := ((pos.CurrentPrice / effectiveEntry) - 1) * 100
 	totalGas := pos.EntryGasCost + result.GasCost
 	gasPctOfPosition := 0.0
 	if pos.Amount > 0 {
@@ -166,9 +223,27 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 	}
 	pnlPct := rawPnlPct - gasPctOfPosition
 
+	// Record partial PnL proportional to the fraction being sold.
+	partialFraction := sellPct / 100.0
+	solPnL := pos.Amount * partialFraction * (rawPnlPct / 100.0)
+	m.store.UpdateDailyPnL(pos.Chain, solPnL)
+
+	// Notify circuit breaker of win/loss.
+	if cb, ok := m.circuitBreakers[pos.Chain]; ok {
+		if pnlPct >= 0 {
+			cb.RecordWin()
+		} else {
+			cb.RecordLoss()
+		}
+	}
+
 	m.store.UpdatePosition(pos.ID, func(p *state.Position) {
 		p.SoldPct += sellPct
+		if p.SoldPct > 100 {
+			p.SoldPct = 100
+		}
 		p.ExitGasCost += result.GasCost
+		p.SellFailures = 0
 		if p.SoldPct >= 100 {
 			p.Closed = true
 			p.PnL = pnlPct
@@ -185,5 +260,5 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 		"tx", result.TxHash,
 	)
 
-	m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pnlPct, reason)
+	m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pos.TokenAddress, pnlPct, reason)
 }

@@ -46,3 +46,17 @@ type Executor interface {
 	Sell(ctx context.Context, params SellParams) SellResult
 	Chain() state.Chain
 }
+
+// PriceFeed can return the current price of a token. Executors that support
+// real-time pricing should implement this.
+type PriceFeed interface {
+	CurrentPrice(ctx context.Context, tokenAddress string) (float64, error)
+}
+
+// SafePrefix returns the first n characters of s, or s itself if shorter than n.
+func SafePrefix(s string, n int) string {
+	if len(s) < n {
+		return s
+	}
+	return s[:n]
+}

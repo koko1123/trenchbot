@@ -37,7 +37,7 @@ func NewEngine(cfg BacktestConfig, log *slog.Logger) *Engine {
 	store := state.NewStore()
 	store.SetPeakEquity(state.ChainSolana, cfg.StartingEquity)
 
-	exec := simulation.NewSimExecutor(state.ChainSolana, clk)
+	exec := simulation.NewSimExecutor(state.ChainSolana, clk, simulation.DefaultSimConfig())
 	if cfg.GasCostPerTx > 0 {
 		exec.SetGasCostPerTx(cfg.GasCostPerTx)
 	}
@@ -62,6 +62,7 @@ func NewEngine(cfg BacktestConfig, log *slog.Logger) *Engine {
 	}, store, clk, log)
 
 	sizer := risk.NewPositionSizer(store, 0.3, 0.05, 8)
+	sizer.SetMaxPositions(5)
 	sizer.SetGasReserves(cfg.GasCostPerTx*10, 0)
 	filt := filter.New(cfg.MinScore, log)
 	mon := monitor.New(store, executors, notifier, monitor.DefaultExitConfig(), clk, true, log)
@@ -200,7 +201,7 @@ func (e *Engine) Run(ctx context.Context, tokens []simulation.SyntheticToken, si
 }
 
 func (e *Engine) processToken(ctx context.Context, st simulation.SyntheticToken) {
-	result := e.filt.Evaluate(st.Token)
+	result := e.filt.Evaluate(ctx, st.Token)
 
 	if !result.Approved {
 		return
@@ -251,9 +252,9 @@ func (e *Engine) processToken(ctx context.Context, st simulation.SyntheticToken)
 		Chain:        state.ChainSolana,
 		TokenAddress: st.Token.Address,
 		TokenSymbol:  st.Token.Symbol,
-		EntryPrice:   1.0,
-		CurrentPrice: 1.0,
-		PeakPrice:    1.0,
+		EntryPrice:   buyResult.Price,
+		CurrentPrice: buyResult.Price,
+		PeakPrice:    buyResult.Price,
 		Amount:       size,
 		EntryTime:    e.clk.Now(),
 		EntryGasCost: buyResult.GasCost,

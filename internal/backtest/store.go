@@ -46,6 +46,9 @@ func (s *Store) CreateTables(ctx context.Context) error {
 
 		CREATE INDEX IF NOT EXISTS idx_tokens_created ON tokens (pool_created_at);
 
+		ALTER TABLE tokens ADD COLUMN IF NOT EXISTS creator TEXT NOT NULL DEFAULT '';
+		CREATE INDEX IF NOT EXISTS idx_tokens_creator ON tokens (creator) WHERE creator != '';
+
 		CREATE TABLE IF NOT EXISTS candles (
 			pool_address TEXT NOT NULL REFERENCES tokens(pool_address),
 			unix_time    BIGINT NOT NULL,

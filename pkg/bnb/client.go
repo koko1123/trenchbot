@@ -54,10 +54,16 @@ func (c *Client) Address() common.Address {
 }
 
 func (c *Client) GetBalance(ctx context.Context) (*big.Int, error) {
+	if c.address == (common.Address{}) {
+		return nil, fmt.Errorf("BNB client has no address configured (missing private key)")
+	}
 	return c.eth.BalanceAt(ctx, c.address, nil)
 }
 
 func (c *Client) GetBalanceBNB(ctx context.Context) (float64, error) {
+	if c.address == (common.Address{}) {
+		return 0, fmt.Errorf("BNB client has no address configured (missing private key)")
+	}
 	bal, err := c.GetBalance(ctx)
 	if err != nil {
 		return 0, err

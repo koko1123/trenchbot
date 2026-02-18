@@ -58,7 +58,8 @@ func (e *PumpFunExecutor) Buy(ctx context.Context, params BuyParams) BuyResult {
 		)
 		return BuyResult{
 			Success: true,
-			TxHash:  "shadow-" + params.TokenAddress[:8],
+			TxHash:  "shadow-" + SafePrefix(params.TokenAddress, 8),
+			Price:   1.0,
 			Amount:  params.Amount,
 			GasCost: solanaGasCost,
 		}
@@ -92,6 +93,7 @@ func (e *PumpFunExecutor) Buy(ctx context.Context, params BuyParams) BuyResult {
 	return BuyResult{
 		Success: true,
 		TxHash:  result,
+		Price:   1.0,
 		Amount:  params.Amount,
 		GasCost: solanaGasCost,
 	}
@@ -107,7 +109,7 @@ func (e *PumpFunExecutor) Sell(ctx context.Context, params SellParams) SellResul
 		)
 		return SellResult{
 			Success: true,
-			TxHash:  "shadow-sell-" + params.TokenAddress[:8],
+			TxHash:  "shadow-sell-" + SafePrefix(params.TokenAddress, 8),
 			GasCost: solanaGasCost,
 		}
 	}
@@ -142,6 +144,13 @@ func (e *PumpFunExecutor) Sell(ctx context.Context, params SellParams) SellResul
 		TxHash:  result,
 		GasCost: solanaGasCost,
 	}
+}
+
+func (e *PumpFunExecutor) CurrentPrice(_ context.Context, _ string) (float64, error) {
+	// TODO: Implement price feed using Jupiter API or Solana RPC bonding curve query.
+	// For now, PumpFun tokens use normalized pricing (entry = 1.0).
+	// The monitor requires an external price update mechanism.
+	return 0, fmt.Errorf("price feed not yet implemented for PumpFun")
 }
 
 func (e *PumpFunExecutor) sendTrade(ctx context.Context, trade pumpTradeRequest) (string, error) {

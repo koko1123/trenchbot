@@ -12,7 +12,7 @@ import (
 type Notifier interface {
 	Send(ctx context.Context, msg string)
 	Snipe(ctx context.Context, chain, symbol, token string, amount, price float64, shadow bool)
-	Exit(ctx context.Context, chain, symbol string, pnlPct float64, reason string)
+	Exit(ctx context.Context, chain, symbol, tokenAddress string, pnlPct float64, reason string)
 	DrawdownWarning(ctx context.Context, chain string, drawdownPct float64)
 }
 
@@ -79,8 +79,8 @@ func (n *SentryNotifier) Snipe(_ context.Context, chain, symbol, token string, a
 	})
 }
 
-func (n *SentryNotifier) Exit(_ context.Context, chain, symbol string, pnlPct float64, reason string) {
-	n.log.Info("EXIT", "chain", chain, "symbol", symbol, "pnl_pct", pnlPct, "reason", reason)
+func (n *SentryNotifier) Exit(_ context.Context, chain, symbol, tokenAddress string, pnlPct float64, reason string) {
+	n.log.Info("EXIT", "chain", chain, "symbol", symbol, "token", tokenAddress, "pnl_pct", pnlPct, "reason", reason)
 
 	if !n.enabled {
 		return

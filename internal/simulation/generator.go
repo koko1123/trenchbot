@@ -2,24 +2,38 @@ package simulation
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
+	"sort"
 	"time"
 
 	"github.com/cindocode/trenchbot/internal/scanner"
 	"github.com/cindocode/trenchbot/internal/state"
 )
 
+// hourWeights defines hour-of-day token emission weight multipliers (UTC).
+// Peak activity is during US afternoon/evening hours (16-19 UTC).
+var hourWeights = []float64{
+	0.3, 0.3, 0.3, 0.3, // 0-3
+	0.6, 0.6, 0.6, 0.6, // 4-7
+	0.8, 0.8, 0.8, 0.8, // 8-11
+	1.0, 1.0, 1.0, 1.0, // 12-15
+	1.8, 1.8, 1.8, 1.8, // 16-19
+	1.0, 1.0, 1.0, 1.0, // 20-23
+}
+
 type TokenArchetype string
 
 const (
-	ArchetypeNakedRug    TokenArchetype = "naked-rug"    // 30% — sparse metadata, obvious rug
-	ArchetypePolishedRug TokenArchetype = "polished-rug"  // 25% — full metadata, passes filter, still rugs
+	ArchetypeNakedRug    TokenArchetype = "naked-rug"    // 28% — sparse metadata, obvious rug
+	ArchetypePolishedRug TokenArchetype = "polished-rug"  // 24% — full metadata, passes filter, still rugs
 	ArchetypeSlowBleed   TokenArchetype = "slow-bleed"    // 15% — pumps modestly then slow-fades below entry
 	ArchetypeSlow        TokenArchetype = "slow"           // 10% — modest pump then settles near entry
 	ArchetypeModerate    TokenArchetype = "moderate"       // 10% — 2-4x
 	ArchetypeMoonshot    TokenArchetype = "moonshot"       // 3%  — 5-15x (capped, not fantasy 50x)
 	ArchetypeScam        TokenArchetype = "scam"           // 5%  — perfect metadata, pumps then instant rug
 	ArchetypeDelayedRug  TokenArchetype = "delayed-rug"    // 2%  — looks moderate for 10min, then rugs
+	ArchetypeHoneypot    TokenArchetype = "honeypot"       // 3%  — passes filter, sell always reverts
 )
 
 type PricePoint struct {
@@ -39,6 +53,15 @@ type GeneratorConfig struct {
 	TokensPerHour     int
 	SimulatedDuration time.Duration
 	Chain             state.Chain
+	RugClusterProb    float64 // probability of a rug cluster per token slot (default 0.03)
+	RugClusterSize    int     // number of tokens in a cluster (default 4)
+	TimeOfDayEnabled  bool    // default true
+}
+
+// GenerateResult holds the generated tokens and metadata about the generation.
+type GenerateResult struct {
+	Tokens      []SyntheticToken
+	RugClusters int
 }
 
 type TokenGenerator struct {
@@ -54,43 +77,164 @@ func NewTokenGenerator(cfg GeneratorConfig) *TokenGenerator {
 }
 
 func (g *TokenGenerator) Generate() []SyntheticToken {
+	result := g.GenerateWithResult()
+	return result.Tokens
+}
+
+func (g *TokenGenerator) GenerateWithResult() GenerateResult {
 	totalTokens := int(g.cfg.SimulatedDuration.Hours()) * g.cfg.TokensPerHour
 	if totalTokens == 0 {
 		totalTokens = 1
 	}
 
-	tokens := make([]SyntheticToken, 0, totalTokens)
-	interval := g.cfg.SimulatedDuration / time.Duration(totalTokens)
+	// Build emit times based on time-of-day weighting or uniform distribution.
+	emitTimes := g.buildEmitTimes(totalTokens)
 
-	for i := 0; i < totalTokens; i++ {
+	tokens := make([]SyntheticToken, 0, totalTokens)
+	rugClusters := 0
+	tokenIdx := 0
+
+	for tokenIdx < totalTokens {
+		// Check for rug cluster generation.
+		if g.cfg.RugClusterProb > 0 && g.rng.Float64() < g.cfg.RugClusterProb {
+			clusterSize := g.cfg.RugClusterSize
+			if clusterSize <= 0 {
+				clusterSize = 4
+			}
+
+			rugClusters++
+			creator := fmt.Sprintf("cluster-creator-%d", rugClusters)
+			baseTime := emitTimes[tokenIdx]
+
+			for j := 0; j < clusterSize; j++ {
+				// Pick a rug-like archetype for cluster tokens.
+				var archetype TokenArchetype
+				if g.rng.Float64() < 0.5 {
+					archetype = ArchetypePolishedRug
+				} else {
+					archetype = ArchetypeScam
+				}
+
+				tok := g.generateToken(tokenIdx+j, archetype)
+				tok.Token.Creator = creator
+				tok.Token.Address = fmt.Sprintf("token_%04d_%s_cluster%d", tokenIdx+j, archetype, rugClusters)
+
+				// Cluster tokens emit 30-60 seconds apart from the first.
+				clusterOffset := time.Duration(j) * (30*time.Second + time.Duration(g.rng.Intn(31))*time.Second)
+				tok.EmitTime = baseTime + clusterOffset
+
+				tokens = append(tokens, tok)
+			}
+
+			// Advance past the slot we used; extra cluster tokens are additive.
+			tokenIdx++
+			continue
+		}
+
 		archetype := g.pickArchetype()
-		token := g.generateToken(i, archetype)
-		token.EmitTime = time.Duration(i) * interval
-		tokens = append(tokens, token)
+		tok := g.generateToken(tokenIdx, archetype)
+		tok.EmitTime = emitTimes[tokenIdx]
+		tokens = append(tokens, tok)
+		tokenIdx++
 	}
 
-	return tokens
+	// Sort by emit time to maintain chronological order after cluster insertion.
+	sort.Slice(tokens, func(i, j int) bool {
+		return tokens[i].EmitTime < tokens[j].EmitTime
+	})
+
+	return GenerateResult{
+		Tokens:      tokens,
+		RugClusters: rugClusters,
+	}
+}
+
+// buildEmitTimes generates emit time offsets for the given number of tokens,
+// using hour-of-day weighting when TimeOfDayEnabled is true.
+func (g *TokenGenerator) buildEmitTimes(totalTokens int) []time.Duration {
+	if !g.cfg.TimeOfDayEnabled {
+		interval := g.cfg.SimulatedDuration / time.Duration(totalTokens)
+		times := make([]time.Duration, totalTokens)
+		for i := range times {
+			times[i] = time.Duration(i) * interval
+		}
+		return times
+	}
+
+	totalHours := int(math.Ceil(g.cfg.SimulatedDuration.Hours()))
+	if totalHours == 0 {
+		totalHours = 1
+	}
+
+	// Calculate total weight across all simulated hours.
+	totalWeight := 0.0
+	for h := 0; h < totalHours; h++ {
+		hourOfDay := h % 24
+		totalWeight += hourWeights[hourOfDay]
+	}
+
+	// Allocate tokens per hour proportional to each hour's weight.
+	tokensPerHour := make([]int, totalHours)
+	allocated := 0
+	for h := 0; h < totalHours; h++ {
+		hourOfDay := h % 24
+		count := int(math.Round(float64(totalTokens) * hourWeights[hourOfDay] / totalWeight))
+		tokensPerHour[h] = count
+		allocated += count
+	}
+
+	// Distribute rounding remainder to the highest-weight hours.
+	diff := totalTokens - allocated
+	for diff != 0 {
+		for h := 0; h < totalHours && diff != 0; h++ {
+			if diff > 0 {
+				tokensPerHour[h]++
+				diff--
+			} else if diff < 0 && tokensPerHour[h] > 0 {
+				tokensPerHour[h]--
+				diff++
+			}
+		}
+	}
+
+	// Build emit times by distributing tokens uniformly within each hour.
+	times := make([]time.Duration, 0, totalTokens)
+	for h := 0; h < totalHours; h++ {
+		count := tokensPerHour[h]
+		if count == 0 {
+			continue
+		}
+		hourStart := time.Duration(h) * time.Hour
+		interval := time.Hour / time.Duration(count)
+		for j := 0; j < count; j++ {
+			times = append(times, hourStart+time.Duration(j)*interval)
+		}
+	}
+
+	return times
 }
 
 func (g *TokenGenerator) pickArchetype() TokenArchetype {
 	r := g.rng.Float64() * 100
 	switch {
-	case r < 30:
+	case r < 28:
 		return ArchetypeNakedRug
-	case r < 55:
+	case r < 52:
 		return ArchetypePolishedRug
-	case r < 70:
+	case r < 67:
 		return ArchetypeSlowBleed
-	case r < 80:
+	case r < 77:
 		return ArchetypeSlow
-	case r < 90:
+	case r < 87:
 		return ArchetypeModerate
-	case r < 93:
+	case r < 90:
 		return ArchetypeMoonshot
-	case r < 98:
+	case r < 95:
 		return ArchetypeScam
-	default:
+	case r < 97:
 		return ArchetypeDelayedRug
+	default:
+		return ArchetypeHoneypot
 	}
 }
 
@@ -186,6 +330,16 @@ func (g *TokenGenerator) generateToken(idx int, archetype TokenArchetype) Synthe
 		token.MarketCapUSD = 2000 + g.rng.Float64()*5000
 		token.Metadata["initialBuy"] = 0.8 + g.rng.Float64()*2.0
 		token.Metadata["marketCapSol"] = 15.0 + g.rng.Float64()*40.0
+
+	case ArchetypeHoneypot:
+		// Full metadata like polished-rug — passes filter, but sell always reverts
+		token.Name = fmt.Sprintf("Honey%d", idx)
+		token.Symbol = fmt.Sprintf("HN%d", idx)
+		token.Description = "Decentralized yield aggregator with audited contracts"
+		token.ImageURL = "https://example.com/honey.png"
+		token.MarketCapUSD = 1500 + g.rng.Float64()*4000
+		token.Metadata["initialBuy"] = 0.5 + g.rng.Float64()*2.0
+		token.Metadata["marketCapSol"] = 10.0 + g.rng.Float64()*40.0
 	}
 
 	curve := g.generatePriceCurve(archetype)
@@ -215,6 +369,8 @@ func (g *TokenGenerator) generatePriceCurve(archetype TokenArchetype) []PricePoi
 		return g.scamCurve()
 	case ArchetypeDelayedRug:
 		return g.delayedRugCurve()
+	case ArchetypeHoneypot:
+		return g.honeypotCurve()
 	default:
 		return g.nakedRugCurve()
 	}
@@ -348,6 +504,30 @@ func (g *TokenGenerator) delayedRugCurve() []PricePoint {
 		{time.Duration(rugMin+5) * time.Minute, 0.03},
 		{60 * time.Minute, 0.01},
 	}
+}
+
+func (g *TokenGenerator) honeypotCurve() []PricePoint {
+	// Pumps to 1.5-2.5x like polished-rug, then dumps — but sell will revert anyway
+	peak := 1.5 + g.rng.Float64()*1.0
+	return []PricePoint{
+		{0, 1.0},
+		{5 * time.Minute, peak},
+		{10 * time.Minute, peak * 0.8},
+		{20 * time.Minute, peak * 0.3},
+	}
+}
+
+// ArchetypeVolatility defines the stochastic price noise coefficient per archetype.
+var ArchetypeVolatility = map[TokenArchetype]float64{
+	ArchetypeNakedRug:    0.15,
+	ArchetypePolishedRug: 0.10,
+	ArchetypeSlowBleed:   0.08,
+	ArchetypeSlow:        0.06,
+	ArchetypeModerate:    0.08,
+	ArchetypeMoonshot:    0.20,
+	ArchetypeScam:        0.12,
+	ArchetypeDelayedRug:  0.08,
+	ArchetypeHoneypot:    0.10,
 }
 
 // InterpolatePrice returns the price at a given time offset by linearly interpolating the curve.

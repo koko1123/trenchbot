@@ -40,9 +40,17 @@ type Report struct {
 	CircuitBreakerPauses int     `json:"circuit_breaker_pauses"`
 	MarketShocks         int     `json:"market_shocks"`
 
-	GasSpent     float64 `json:"gas_spent"`
-	GasRemaining float64 `json:"gas_remaining"`
-	GasPerTrade  float64 `json:"gas_per_trade"`
+	GasSpent       float64 `json:"gas_spent"`
+	GasRemaining   float64 `json:"gas_remaining"`
+	GasPerTrade    float64 `json:"gas_per_trade"`
+	ReEntryBlocked int     `json:"re_entry_blocked"`
+
+	TotalSlippageCost float64 `json:"total_slippage_cost"`
+	TotalFrontRunCost float64 `json:"total_front_run_cost"`
+	GasSpikeEvents    int     `json:"gas_spike_events"`
+	RugClusters       int     `json:"rug_clusters"`
+	HoneypotCount     int     `json:"honeypot_count"`
+	SellFailures      int     `json:"sell_failures"`
 
 	ArchetypeResults map[TokenArchetype]ArchetypeStats `json:"archetype_results"`
 }
@@ -89,6 +97,15 @@ func (r *Report) String() string {
 	b.WriteString(fmt.Sprintf("Gas Spent:    %.6f\n", r.GasSpent))
 	b.WriteString(fmt.Sprintf("Gas Left:     %.6f\n", r.GasRemaining))
 	b.WriteString(fmt.Sprintf("Gas/Trade:    %.6f\n", r.GasPerTrade))
+	b.WriteString(fmt.Sprintf("Slippage Cost:  %.6f\n", r.TotalSlippageCost))
+	b.WriteString(fmt.Sprintf("FrontRun Cost:  %.6f\n", r.TotalFrontRunCost))
+	b.WriteString(fmt.Sprintf("Gas Spikes:     %d\n", r.GasSpikeEvents))
+	b.WriteString(fmt.Sprintf("Rug Clusters:   %d\n", r.RugClusters))
+	b.WriteString(fmt.Sprintf("Honeypots:      %d\n", r.HoneypotCount))
+	b.WriteString(fmt.Sprintf("Sell Failures:  %d\n", r.SellFailures))
+	if r.ReEntryBlocked > 0 {
+		b.WriteString(fmt.Sprintf("Re-entry Blocked: %d\n", r.ReEntryBlocked))
+	}
 	b.WriteString("\n--- Exits by Reason ---\n")
 	for reason, count := range r.ExitsByReason {
 		b.WriteString(fmt.Sprintf("  %-20s %d\n", reason, count))

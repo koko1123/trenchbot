@@ -14,18 +14,20 @@ import (
 )
 
 type FourMemeScanner struct {
-	apiURL string
-	apiKey string
-	log    *slog.Logger
-	client *http.Client
+	apiURL        string
+	apiKey        string
+	proxyContract string
+	log           *slog.Logger
+	client        *http.Client
 }
 
-func NewFourMemeScanner(apiURL, apiKey string, log *slog.Logger) *FourMemeScanner {
+func NewFourMemeScanner(apiURL, apiKey, proxyContract string, log *slog.Logger) *FourMemeScanner {
 	return &FourMemeScanner{
-		apiURL: apiURL,
-		apiKey: apiKey,
-		log:    log,
-		client: &http.Client{Timeout: 30 * time.Second},
+		apiURL:        apiURL,
+		apiKey:        apiKey,
+		proxyContract: proxyContract,
+		log:           log,
+		client:        &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -89,7 +91,6 @@ const bitqueryNewTokenQuery = `{
 
 func (s *FourMemeScanner) Scan(ctx context.Context, out chan<- NewToken) error {
 	seen := make(map[string]bool)
-	proxyContract := "0x5c952063c7fc8610FFDB798152D69F0B9550762b"
 
 	s.log.Info("four.meme scanner started", "poll_interval", "5s")
 
@@ -101,7 +102,7 @@ func (s *FourMemeScanner) Scan(ctx context.Context, out chan<- NewToken) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			tokens, err := s.pollNewTokens(ctx, proxyContract)
+			tokens, err := s.pollNewTokens(ctx, s.proxyContract)
 			if err != nil {
 				s.log.Error("four.meme poll error", "err", err)
 				continue
@@ -111,6 +112,9 @@ func (s *FourMemeScanner) Scan(ctx context.Context, out chan<- NewToken) error {
 					continue
 				}
 				seen[t.Address] = true
+				if len(seen) > 50000 {
+					seen = make(map[string]bool)
+				}
 				s.log.Info("new token detected",
 					"chain", "bnb",
 					"address", t.Address,
@@ -148,6 +152,10 @@ func (s *FourMemeScanner) pollNewTokens(ctx context.Context, proxyContract strin
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bitquery status %d: %s", resp.StatusCode, string(respBody[:min(len(respBody), 200)]))
 	}
 
 	var result bitqueryResponse

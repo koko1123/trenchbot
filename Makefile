@@ -1,4 +1,4 @@
-.PHONY: build run shadow test lint simulate ci clean backtest watcher
+.PHONY: build run shadow test lint simulate ci clean backtest watcher docker-sniper
 
 build:
 	go build -o trenchbot ./cmd/sniper
@@ -25,6 +25,9 @@ watcher:
 
 backtest:
 	go run ./cmd/backtest
+
+docker-sniper:
+	docker build -t trenchbot-sniper .
 
 clean:
 	rm -f trenchbot simulation-report.json

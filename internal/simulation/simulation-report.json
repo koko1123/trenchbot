@@ -1,76 +1,91 @@
 {
   "seed": 42,
   "simulated_duration": 21600000000000,
-  "wall_clock_elapsed": 609054958,
-  "tokens_generated": 360,
-  "tokens_filtered": 240,
-  "tokens_blocked": 183,
-  "tokens_bought": 57,
+  "wall_clock_elapsed": 43433333,
+  "tokens_generated": 384,
+  "tokens_filtered": 281,
+  "tokens_blocked": 221,
+  "tokens_bought": 60,
   "exits_by_reason": {
-    "end-of-sim": 2,
-    "stale-position": 28,
-    "stop-loss": 25,
-    "trailing-stop": 2,
-    "tranche-1": 14,
-    "tranche-2": 2
+    "early-trailing-stop": 6,
+    "end-of-sim": 1,
+    "stale-position": 25,
+    "stop-loss": 28,
+    "tranche-1": 16
   },
-  "total_pnl_pct": 2100.393460562086,
-  "win_count": 27,
+  "total_pnl_pct": 786.8333488823866,
+  "win_count": 30,
   "loss_count": 46,
-  "win_rate": 0.3698630136986301,
-  "best_trade": 728.824896398762,
-  "worst_trade": -68.54371679745921,
-  "average_pnl": 28.77251315838474,
-  "max_drawdown_pct": 0.3942630360782261,
+  "win_rate": 0.39473684210526316,
+  "best_trade": 178.0687958946312,
+  "worst_trade": -78.553036346958,
+  "average_pnl": 10.353070380031403,
+  "max_drawdown_pct": 0.12115889971434171,
   "circuit_breaker_halts": 0,
-  "circuit_breaker_pauses": 13,
-  "market_shocks": 7,
+  "circuit_breaker_pauses": 19,
+  "market_shocks": 5,
+  "gas_spent": 0.13422510790074293,
+  "gas_remaining": 0.11577489209925672,
+  "gas_per_trade": 0.001766119840799249,
+  "re_entry_blocked": 28,
+  "total_slippage_cost": 0.05822624999999877,
+  "total_front_run_cost": 2.1144322751406976,
+  "gas_spike_events": 7,
+  "rug_clusters": 8,
+  "honeypot_count": 14,
+  "sell_failures": 5,
   "archetype_results": {
     "delayed-rug": {
-      "generated": 9,
-      "bought": 3,
+      "generated": 5,
+      "bought": 0,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "honeypot": {
+      "generated": 14,
+      "bought": 0,
       "avg_pnl": 0,
       "win_rate": 0
     },
     "moderate": {
-      "generated": 36,
-      "bought": 8,
+      "generated": 40,
+      "bought": 14,
       "avg_pnl": 0,
       "win_rate": 0
     },
     "moonshot": {
-      "generated": 12,
+      "generated": 8,
       "bought": 2,
       "avg_pnl": 0,
       "win_rate": 0
     },
     "naked-rug": {
-      "generated": 120,
+      "generated": 103,
       "bought": 0,
       "avg_pnl": 0,
       "win_rate": 0
     },
     "polished-rug": {
-      "generated": 77,
+      "generated": 96,
       "bought": 20,
       "avg_pnl": 0,
       "win_rate": 0
     },
     "scam": {
-      "generated": 22,
-      "bought": 2,
+      "generated": 38,
+      "bought": 5,
       "avg_pnl": 0,
       "win_rate": 0
     },
     "slow": {
-      "generated": 33,
-      "bought": 6,
+      "generated": 39,
+      "bought": 7,
       "avg_pnl": 0,
       "win_rate": 0
     },
     "slow-bleed": {
-      "generated": 51,
-      "bought": 16,
+      "generated": 41,
+      "bought": 12,
       "avg_pnl": 0,
       "win_rate": 0
     }

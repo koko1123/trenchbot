@@ -1,0 +1,93 @@
+{
+  "seed": 1010,
+  "simulated_duration": 21600000000000,
+  "wall_clock_elapsed": 82648708,
+  "tokens_generated": 393,
+  "tokens_filtered": 313,
+  "tokens_blocked": 263,
+  "tokens_bought": 50,
+  "exits_by_reason": {
+    "early-trailing-stop": 6,
+    "end-of-sim": 5,
+    "stale-position": 15,
+    "stop-loss": 24,
+    "tranche-1": 14
+  },
+  "total_pnl_pct": 456.6386284287327,
+  "win_count": 25,
+  "loss_count": 39,
+  "win_rate": 0.390625,
+  "best_trade": 166.56507533425395,
+  "worst_trade": -92.81938795735981,
+  "average_pnl": 7.134978569198949,
+  "max_drawdown_pct": 0.10123256186578657,
+  "circuit_breaker_halts": 0,
+  "circuit_breaker_pauses": 6,
+  "market_shocks": 9,
+  "gas_spent": 0.23681456234238263,
+  "gas_remaining": 0.01318543765761737,
+  "gas_per_trade": 0.0037002275365997286,
+  "re_entry_blocked": 24,
+  "total_slippage_cost": 0.03855749999999918,
+  "total_front_run_cost": 1.139020847853556,
+  "gas_spike_events": 9,
+  "rug_clusters": 11,
+  "honeypot_count": 7,
+  "sell_failures": 498,
+  "archetype_results": {
+    "delayed-rug": {
+      "generated": 11,
+      "bought": 0,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "honeypot": {
+      "generated": 7,
+      "bought": 3,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "moderate": {
+      "generated": 42,
+      "bought": 8,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "moonshot": {
+      "generated": 10,
+      "bought": 2,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "naked-rug": {
+      "generated": 80,
+      "bought": 0,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "polished-rug": {
+      "generated": 100,
+      "bought": 9,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "scam": {
+      "generated": 40,
+      "bought": 7,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "slow": {
+      "generated": 49,
+      "bought": 7,
+      "avg_pnl": 0,
+      "win_rate": 0
+    },
+    "slow-bleed": {
+      "generated": 54,
+      "bought": 14,
+      "avg_pnl": 0,
+      "win_rate": 0
+    }
+  }
+}

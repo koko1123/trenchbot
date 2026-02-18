@@ -25,6 +25,8 @@ type CircuitBreaker struct {
 	snipeTimestamps     []time.Time
 	errorTimestamps     []time.Time
 	startingEquity      float64
+	dailyPausedUntil       time.Time
+	consecutivePauseCycles int
 }
 
 type CircuitBreakerConfig struct {
@@ -60,6 +62,9 @@ func (cb *CircuitBreaker) CanSnipe() bool {
 	if cb.clock.Now().Before(cb.pausedUntil) {
 		return false
 	}
+	if cb.clock.Now().Before(cb.dailyPausedUntil) {
+		return false
+	}
 	return !cb.hourlyLimitReached()
 }
 
@@ -67,6 +72,16 @@ func (cb *CircuitBreaker) RecordSnipe() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.snipeTimestamps = append(cb.snipeTimestamps, cb.clock.Now())
+
+	// Prune entries older than 1 hour.
+	cutoff := cb.clock.Now().Add(-1 * time.Hour)
+	fresh := cb.snipeTimestamps[:0]
+	for _, t := range cb.snipeTimestamps {
+		if t.After(cutoff) {
+			fresh = append(fresh, t)
+		}
+	}
+	cb.snipeTimestamps = fresh
 }
 
 func (cb *CircuitBreaker) RecordLoss() {
@@ -74,10 +89,15 @@ func (cb *CircuitBreaker) RecordLoss() {
 	defer cb.mu.Unlock()
 	cb.consecutiveLosses++
 	if cb.consecutiveLosses >= cb.consecutiveLossCap {
-		cb.pausedUntil = cb.clock.Now().Add(1 * time.Hour)
+		cb.consecutivePauseCycles++
+		// Escalate: 1h, 2h, 4h, max 8h.
+		hours := 1 << min(cb.consecutivePauseCycles-1, 3)
+		cb.pausedUntil = cb.clock.Now().Add(time.Duration(hours) * time.Hour)
 		cb.log.Warn("circuit breaker: consecutive loss pause",
 			"chain", cb.chain,
 			"losses", cb.consecutiveLosses,
+			"pause_hours", hours,
+			"cycle", cb.consecutivePauseCycles,
 			"paused_until", cb.pausedUntil,
 		)
 		cb.consecutiveLosses = 0
@@ -96,18 +116,21 @@ func (cb *CircuitBreaker) RecordError() {
 	now := cb.clock.Now()
 	cb.errorTimestamps = append(cb.errorTimestamps, now)
 
+	// Prune entries older than 10 minutes.
 	cutoff := now.Add(-10 * time.Minute)
-	recentErrors := 0
+	fresh := cb.errorTimestamps[:0]
 	for _, t := range cb.errorTimestamps {
 		if t.After(cutoff) {
-			recentErrors++
+			fresh = append(fresh, t)
 		}
 	}
-	if recentErrors > 5 {
+	cb.errorTimestamps = fresh
+
+	if len(fresh) > 5 {
 		cb.pausedUntil = now.Add(10 * time.Minute)
 		cb.log.Warn("circuit breaker: error rate pause",
 			"chain", cb.chain,
-			"errors_10m", recentErrors,
+			"errors_10m", len(fresh),
 		)
 	}
 }
@@ -131,12 +154,61 @@ func (cb *CircuitBreaker) Check(currentEquity float64) {
 			"current", currentEquity,
 		)
 	}
+
+	// Daily loss limit: pause until next midnight UTC
+	if cb.dailyLossLimitPct > 0 && cb.startingEquity > 0 {
+		dailyPnL := cb.store.GetDailyPnL(cb.chain)
+		if dailyPnL < 0 {
+			dailyLossPct := (-dailyPnL / cb.startingEquity) * 100
+			if dailyLossPct >= cb.dailyLossLimitPct && cb.clock.Now().After(cb.dailyPausedUntil) {
+				now := cb.clock.Now().UTC()
+				nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
+				cb.dailyPausedUntil = nextMidnight
+				cb.log.Warn("circuit breaker: daily loss limit pause",
+					"chain", cb.chain,
+					"daily_loss_pct", dailyLossPct,
+					"paused_until", nextMidnight,
+				)
+			}
+		}
+	}
 }
 
 func (cb *CircuitBreaker) IsHalted() bool {
 	cb.mu.RLock()
 	defer cb.mu.RUnlock()
 	return cb.halted
+}
+
+// Status returns a human-readable status string for the circuit breaker.
+func (cb *CircuitBreaker) Status() string {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+
+	if cb.halted {
+		return "halted"
+	}
+	if cb.clock.Now().Before(cb.pausedUntil) || cb.clock.Now().Before(cb.dailyPausedUntil) {
+		return "paused"
+	}
+	if cb.hourlyLimitReached() {
+		return "rate-limited"
+	}
+	return "ok"
+}
+
+// ConsecutiveLosses returns the current consecutive loss count.
+func (cb *CircuitBreaker) ConsecutiveLosses() int {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+	return cb.consecutiveLosses
+}
+
+// ResetPauseCycles resets the escalating pause cycle counter (called at daily reset).
+func (cb *CircuitBreaker) ResetPauseCycles() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.consecutivePauseCycles = 0
 }
 
 func (cb *CircuitBreaker) hourlyLimitReached() bool {

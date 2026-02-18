@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -50,7 +51,15 @@ func (c *Client) GetBalance(ctx context.Context) (float64, error) {
 }
 
 func (c *Client) GetSignatureStatus(ctx context.Context, sig string) (bool, error) {
-	s := solana.MustSignatureFromBase58(sig)
+	// Shadow transactions are always considered confirmed.
+	if strings.HasPrefix(sig, "shadow-") {
+		return true, nil
+	}
+
+	s, err := solana.SignatureFromBase58(sig)
+	if err != nil {
+		return false, fmt.Errorf("parsing signature: %w", err)
+	}
 	result, err := c.rpc.GetSignatureStatuses(ctx, false, s)
 	if err != nil {
 		return false, fmt.Errorf("getting signature status: %w", err)

@@ -55,11 +55,15 @@ func (e *FourMemeExecutor) Buy(ctx context.Context, params BuyParams) BuyResult 
 		)
 		return BuyResult{
 			Success: true,
-			TxHash:  "shadow-" + params.TokenAddress[:8],
+			TxHash:  "shadow-" + SafePrefix(params.TokenAddress, 8),
+			Price:   1.0,
 			Amount:  params.Amount,
 			GasCost: bnbEstimatedGasCost,
 		}
 	}
+
+	// Block live buys until sell is implemented to prevent stranded positions.
+	return BuyResult{Error: fmt.Errorf("four.meme live buy blocked: sell not yet implemented")}
 
 	tokenAddr := common.HexToAddress(params.TokenAddress)
 	amountWei := etherToWei(params.Amount)
@@ -117,6 +121,7 @@ func (e *FourMemeExecutor) Buy(ctx context.Context, params BuyParams) BuyResult 
 	return BuyResult{
 		Success: true,
 		TxHash:  txHash,
+		Price:   1.0,
 		Amount:  params.Amount,
 		GasCost: gasCostBNB,
 	}
@@ -132,7 +137,7 @@ func (e *FourMemeExecutor) Sell(ctx context.Context, params SellParams) SellResu
 		)
 		return SellResult{
 			Success: true,
-			TxHash:  "shadow-sell-" + params.TokenAddress[:8],
+			TxHash:  "shadow-sell-" + SafePrefix(params.TokenAddress, 8),
 			GasCost: bnbEstimatedGasCost,
 		}
 	}

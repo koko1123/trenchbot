@@ -135,6 +135,45 @@ func TestDrawdownHalt_Boundary(t *testing.T) {
 	}
 }
 
+func TestDailyLossLimitPause(t *testing.T) {
+	start := time.Date(2025, 6, 1, 14, 0, 0, 0, time.UTC) // 2pm UTC
+	clk := clock.NewSimClock(start)
+	cb, store := newTestBreaker(clk)
+
+	// Simulate daily loss of 8% of starting equity (1200 * 0.08 = 96)
+	store.UpdateDailyPnL(state.ChainSolana, -96)
+	cb.Check(1104) // equity dropped but not enough for drawdown halt
+
+	if cb.CanSnipe() {
+		t.Error("should be paused after daily loss limit hit")
+	}
+
+	// Advance to just before midnight — still paused
+	clk.Advance(9*time.Hour + 59*time.Minute)
+	if cb.CanSnipe() {
+		t.Error("should still be paused before midnight")
+	}
+
+	// Advance past midnight
+	clk.Advance(2 * time.Minute)
+	if !cb.CanSnipe() {
+		t.Error("should be unpaused after midnight")
+	}
+}
+
+func TestDailyLossLimitNotTriggered(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	cb, store := newTestBreaker(clk)
+
+	// 7% daily loss — below 8% limit
+	store.UpdateDailyPnL(state.ChainSolana, -84)
+	cb.Check(1116)
+
+	if !cb.CanSnipe() {
+		t.Error("7% daily loss should not trigger pause")
+	}
+}
+
 func TestHourlyRateLimit(t *testing.T) {
 	clk := clock.NewSimClock(time.Now())
 	cb, _ := newTestBreaker(clk)

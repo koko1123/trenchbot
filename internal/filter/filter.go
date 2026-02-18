@@ -1,11 +1,18 @@
 package filter
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/cindocode/trenchbot/internal/scanner"
 )
+
+// CreatorLookup provides creator rug history from the database.
+type CreatorLookup interface {
+	CreatorHistory(ctx context.Context, creator string) (total int, rugCount int, err error)
+}
 
 type Result struct {
 	Token    scanner.NewToken
@@ -15,8 +22,9 @@ type Result struct {
 }
 
 type Filter struct {
-	minScore int
-	log      *slog.Logger
+	minScore      int
+	log           *slog.Logger
+	creatorLookup CreatorLookup
 }
 
 func New(minScore int, log *slog.Logger) *Filter {
@@ -26,7 +34,12 @@ func New(minScore int, log *slog.Logger) *Filter {
 	}
 }
 
-func (f *Filter) Evaluate(token scanner.NewToken) Result {
+// SetCreatorLookup sets the optional creator history lookup.
+func (f *Filter) SetCreatorLookup(cl CreatorLookup) {
+	f.creatorLookup = cl
+}
+
+func (f *Filter) Evaluate(ctx context.Context, token scanner.NewToken) Result {
 	score := 0
 	var reasons []string
 
@@ -36,7 +49,7 @@ func (f *Filter) Evaluate(token scanner.NewToken) Result {
 	reasons = append(reasons, metaReasons...)
 
 	// Creator analysis (0-25 points)
-	creatorScore, creatorReasons := f.scoreCreator(token)
+	creatorScore, creatorReasons := f.scoreCreator(ctx, token)
 	score += creatorScore
 	reasons = append(reasons, creatorReasons...)
 
@@ -95,7 +108,7 @@ func (f *Filter) scoreMetadata(token scanner.NewToken) (int, []string) {
 	return score, reasons
 }
 
-func (f *Filter) scoreCreator(token scanner.NewToken) (int, []string) {
+func (f *Filter) scoreCreator(ctx context.Context, token scanner.NewToken) (int, []string) {
 	score := 0
 	var reasons []string
 
@@ -104,11 +117,24 @@ func (f *Filter) scoreCreator(token scanner.NewToken) (int, []string) {
 		reasons = append(reasons, "creator identified (+10)")
 	}
 
-	// Creator history would be checked via on-chain lookups in production.
-	// For now, award base points for having a creator.
-	if token.Creator != "" {
+	if token.Creator != "" && len(token.Creator) >= 32 {
 		score += 5
-		reasons = append(reasons, "creator has wallet (+5)")
+		reasons = append(reasons, "creator wallet looks valid (+5)")
+	}
+
+	// Creator history lookup from Postgres.
+	if f.creatorLookup != nil && token.Creator != "" {
+		total, rugs, err := f.creatorLookup.CreatorHistory(ctx, token.Creator)
+		if err == nil && total > 0 {
+			rugRate := float64(rugs) / float64(total)
+			if rugRate > 0.7 {
+				score -= 20
+				reasons = append(reasons, fmt.Sprintf("serial rugger: %d/%d rugs (-20)", rugs, total))
+			} else if total >= 3 && rugRate < 0.3 {
+				score += 10
+				reasons = append(reasons, fmt.Sprintf("clean creator: %d tokens, %d rugs (+10)", total, rugs))
+			}
+		}
 	}
 
 	return score, reasons
