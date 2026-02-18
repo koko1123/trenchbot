@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -478,5 +479,44 @@ func TestEvaluateExit_SoldPctClamp(t *testing.T) {
 	}
 	if !pos.Closed {
 		t.Error("position should be closed after selling remaining")
+	}
+}
+
+func TestExecuteSell_ConcurrentDedup(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	mon, store, exec, _ := setupMonitor(clk)
+
+	// Add a small delay to the executor so both goroutines overlap.
+	exec.SellFn = func(ctx context.Context, params executor.SellParams) executor.SellResult {
+		time.Sleep(50 * time.Millisecond)
+		return executor.SellResult{
+			Success: true,
+			TxHash:  "mock-sell-" + params.TokenAddress,
+			Price:   1.0,
+			Amount:  params.AmountPct,
+			GasCost: 0.000505,
+		}
+	}
+
+	store.AddPosition(&state.Position{
+		ID: "p1", Chain: state.ChainSolana, TokenAddress: "addr1", TokenSymbol: "DEDUP",
+		EntryPrice: 1.0, CurrentPrice: 0.4, PeakPrice: 1.0, Amount: 0.3, EntryTime: clk.Now(),
+	})
+
+	pos, _ := store.GetPosition("p1")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			mon.executeSell(context.Background(), pos, 100, "stop-loss")
+		}()
+	}
+	wg.Wait()
+
+	sells := exec.GetSellCalls()
+	if len(sells) != 1 {
+		t.Errorf("expected exactly 1 sell call due to dedup lock, got %d", len(sells))
 	}
 }

@@ -215,3 +215,82 @@ func TestHourlyRateLimit(t *testing.T) {
 		t.Error("should be unblocked after hourly window slides")
 	}
 }
+
+func TestExportImportState(t *testing.T) {
+	clk := clock.NewSimClock(time.Now())
+	cb1, _ := newTestBreaker(clk)
+
+	// Build up state: record losses to trigger a pause, record some snipes and errors.
+	for i := 0; i < 10; i++ {
+		cb1.RecordLoss()
+	}
+	for i := 0; i < 3; i++ {
+		cb1.RecordSnipe()
+	}
+	for i := 0; i < 4; i++ {
+		cb1.RecordError()
+	}
+
+	// cb1 should now be paused (10 consecutive losses hit the cap).
+	if cb1.CanSnipe() {
+		t.Fatal("cb1 should be paused after 10 losses")
+	}
+
+	exported := cb1.ExportState()
+
+	// Verify exported fields are populated.
+	if exported.PauseCycles != 1 {
+		t.Errorf("expected pause_cycles=1, got %d", exported.PauseCycles)
+	}
+	if len(exported.SnipeTimestamps) != 3 {
+		t.Errorf("expected 3 snipe timestamps, got %d", len(exported.SnipeTimestamps))
+	}
+	if len(exported.ErrorTimestamps) != 4 {
+		t.Errorf("expected 4 error timestamps, got %d", len(exported.ErrorTimestamps))
+	}
+
+	// Create a fresh circuit breaker and import the state.
+	cb2, _ := newTestBreaker(clk)
+
+	// Fresh breaker should be able to snipe.
+	if !cb2.CanSnipe() {
+		t.Fatal("fresh cb2 should be able to snipe")
+	}
+
+	cb2.ImportState(exported)
+
+	// After import, cb2 should be paused just like cb1 was.
+	if cb2.CanSnipe() {
+		t.Error("cb2 should be paused after importing state")
+	}
+	if cb2.Status() != "paused" {
+		t.Errorf("expected status 'paused', got %q", cb2.Status())
+	}
+
+	// Advance past the pause and verify cb2 can snipe again.
+	clk.Advance(61 * time.Minute)
+	if !cb2.CanSnipe() {
+		t.Error("cb2 should be unpaused after advancing clock")
+	}
+
+	// Test halted state round-trip.
+	cb3, _ := newTestBreaker(clk)
+	cb3.Check(500) // triggers halt (58% drawdown > 50%)
+	if !cb3.IsHalted() {
+		t.Fatal("cb3 should be halted")
+	}
+
+	haltedState := cb3.ExportState()
+	if !haltedState.Halted {
+		t.Error("exported state should have halted=true")
+	}
+
+	cb4, _ := newTestBreaker(clk)
+	cb4.ImportState(haltedState)
+	if !cb4.IsHalted() {
+		t.Error("cb4 should be halted after import")
+	}
+	if cb4.CanSnipe() {
+		t.Error("halted cb4 should not allow sniping")
+	}
+}

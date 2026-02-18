@@ -77,6 +77,16 @@ type Trade struct {
 	GasCost      float64 // gas cost in native token
 }
 
+// CBState is the serializable circuit breaker state for snapshot persistence.
+type CBState struct {
+	Halted            bool        `json:"halted"`
+	ConsecutiveLosses int         `json:"consecutive_losses"`
+	PausedUntil       time.Time   `json:"paused_until"`
+	PauseCycles       int         `json:"pause_cycles"`
+	SnipeTimestamps   []time.Time `json:"snipe_timestamps"`
+	ErrorTimestamps   []time.Time `json:"error_timestamps"`
+}
+
 type Store struct {
 	mu            sync.RWMutex
 	positions     map[string]*Position // ID -> Position
@@ -86,6 +96,7 @@ type Store struct {
 	gasBalance    map[Chain]float64
 	gasSpent      map[Chain]float64
 	reservedSlots map[Chain]int // reserved but not yet filled slots
+	cbState       map[Chain]CBState
 
 	// Token flow counters (atomic, no lock needed).
 	tokensSeen   atomic.Int64 // total tokens received from scanner
@@ -100,6 +111,7 @@ func NewStore() *Store {
 		gasBalance:    make(map[Chain]float64),
 		gasSpent:      make(map[Chain]float64),
 		reservedSlots: make(map[Chain]int),
+		cbState:       make(map[Chain]CBState),
 	}
 }
 
@@ -300,6 +312,20 @@ func (s *Store) totalReservedSlots() int {
 	return total
 }
 
+// GetCBState returns the persisted circuit breaker state for a chain.
+func (s *Store) GetCBState(chain Chain) CBState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cbState[chain]
+}
+
+// SetCBState stores the circuit breaker state for a chain.
+func (s *Store) SetCBState(chain Chain, st CBState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cbState[chain] = st
+}
+
 // stateSnapshot is the JSON-serializable form of the store.
 type stateSnapshot struct {
 	Positions  map[string]*Position `json:"positions"`
@@ -307,6 +333,7 @@ type stateSnapshot struct {
 	PeakEquity map[Chain]float64    `json:"peak_equity"`
 	GasBalance map[Chain]float64    `json:"gas_balance"`
 	GasSpent   map[Chain]float64    `json:"gas_spent"`
+	CBState    map[Chain]CBState    `json:"cb_state,omitempty"`
 }
 
 // SaveSnapshot writes the store to a JSON file atomically.
@@ -318,6 +345,7 @@ func (s *Store) SaveSnapshot(path string) error {
 		PeakEquity: s.peakEquity,
 		GasBalance: s.gasBalance,
 		GasSpent:   s.gasSpent,
+		CBState:    s.cbState,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	s.mu.RUnlock()
@@ -367,6 +395,9 @@ func (s *Store) LoadSnapshot(path string) error {
 	}
 	if snap.GasSpent != nil {
 		s.gasSpent = snap.GasSpent
+	}
+	if snap.CBState != nil {
+		s.cbState = snap.CBState
 	}
 	return nil
 }

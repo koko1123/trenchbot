@@ -208,6 +208,40 @@ func (cb *CircuitBreaker) Heat() float64 {
 	return heat
 }
 
+// ExportState returns a serializable snapshot of the circuit breaker state.
+func (cb *CircuitBreaker) ExportState() state.CBState {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	snipes := make([]time.Time, len(cb.snipeTimestamps))
+	copy(snipes, cb.snipeTimestamps)
+	errors := make([]time.Time, len(cb.errorTimestamps))
+	copy(errors, cb.errorTimestamps)
+	return state.CBState{
+		Halted:            cb.halted,
+		ConsecutiveLosses: cb.consecutiveLosses,
+		PausedUntil:       cb.pausedUntil,
+		PauseCycles:       cb.consecutivePauseCycles,
+		SnipeTimestamps:   snipes,
+		ErrorTimestamps:   errors,
+	}
+}
+
+// ImportState restores circuit breaker state from a persisted snapshot.
+func (cb *CircuitBreaker) ImportState(s state.CBState) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.halted = s.Halted
+	cb.consecutiveLosses = s.ConsecutiveLosses
+	cb.pausedUntil = s.PausedUntil
+	cb.consecutivePauseCycles = s.PauseCycles
+	if s.SnipeTimestamps != nil {
+		cb.snipeTimestamps = s.SnipeTimestamps
+	}
+	if s.ErrorTimestamps != nil {
+		cb.errorTimestamps = s.ErrorTimestamps
+	}
+}
+
 func (cb *CircuitBreaker) hourlyLimitReached() bool {
 	cutoff := cb.clock.Now().Add(-1 * time.Hour)
 	recent := 0

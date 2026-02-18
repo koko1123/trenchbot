@@ -100,6 +100,26 @@ func main() {
 		solBalance = bal
 		log.Info("solana wallet balance", "sol", solBalance)
 	}
+	// Live mode: verify sufficient balance before proceeding.
+	if cfg.IsLive() {
+		minRequired := cfg.SolanaSnipeAmount + cfg.MinGasReserveSOL
+		if solBalance < minRequired {
+			log.Error("insufficient balance for live mode",
+				"balance", solBalance,
+				"min_required", minRequired,
+				"snipe_amount", cfg.SolanaSnipeAmount,
+				"gas_reserve", cfg.MinGasReserveSOL,
+			)
+			os.Exit(1)
+		}
+	}
+
+	// In shadow mode, use sweep reserve as starting equity so heat calculations
+	// are realistic (wallet balance is 0 in shadow mode).
+	if !cfg.IsLive() && solBalance < cfg.SweepReserveSOL {
+		solBalance = cfg.SweepReserveSOL
+		log.Info("shadow mode: using sweep reserve as starting equity", "sol", solBalance)
+	}
 
 	solCB := risk.NewCircuitBreaker(risk.CircuitBreakerConfig{
 		Chain:              state.ChainSolana,
@@ -109,6 +129,16 @@ func main() {
 		MaxSnipesPerHour:   cfg.MaxSnipesPerHour,
 		StartingEquity:     solBalance,
 	}, store, clk, log)
+
+	// Restore circuit breaker state from snapshot (preserves halt/pause across restarts).
+	if cbState := store.GetCBState(state.ChainSolana); cbState.Halted || cbState.ConsecutiveLosses > 0 || !cbState.PausedUntil.IsZero() {
+		solCB.ImportState(cbState)
+		log.Info("circuit breaker state restored from snapshot",
+			"halted", cbState.Halted,
+			"consecutive_losses", cbState.ConsecutiveLosses,
+			"pause_cycles", cbState.PauseCycles,
+		)
+	}
 
 	// Initialize gas balance from actual wallet balance.
 	store.SetGasBalance(state.ChainSolana, solBalance)
@@ -221,6 +251,22 @@ func main() {
 		state.ChainSolana: solCB,
 	})
 	mon.SetPerformanceTracker(perfTracker)
+	mon.SetTradeRecorder(func(ctx context.Context, txHash string, chain state.Chain, tokenAddress, tokenSymbol string, sellPrice, amount, pnlPct, gasCost float64, reason string, shadow bool) {
+		rep.RecordTrade(ctx, reporter.TradeRow{
+			ID:           txHash,
+			Chain:        string(chain),
+			TokenAddress: tokenAddress,
+			TokenSymbol:  tokenSymbol,
+			Side:         "sell",
+			Price:        sellPrice,
+			Amount:       amount,
+			PnLPct:       &pnlPct,
+			ExitReason:   &reason,
+			GasCost:      gasCost,
+			Shadow:       shadow,
+			CreatedAt:    clk.Now(),
+		})
+	})
 
 	// Anti-bot intelligence (Phase 3).
 	bundleDetector := filter.NewBundleDetector(cfg.BundleDetectionEnabled)
@@ -264,6 +310,17 @@ func main() {
 
 	pumpScanner := scanner.NewPumpFunScanner(cfg.PumpPortalWSURL, log)
 	pumpScanner.SetTradeChannel(tradeCh)
+
+	// Re-subscribe to trade feeds for open positions restored from snapshot.
+	for _, pos := range store.AllOpenPositions() {
+		if pos.Chain == state.ChainSolana {
+			pumpScanner.SubscribeToken(pos.TokenAddress)
+			log.Info("re-subscribed to trade feed for restored position",
+				"token", pos.TokenSymbol,
+				"id", pos.ID,
+			)
+		}
+	}
 
 	// Per-position CUSUM anomaly detectors for open positions.
 	var positionAnomalyDetectors sync.Map // mint -> *flow.TokenAnomalyDetector
@@ -570,7 +627,9 @@ func main() {
 				return
 			case <-resetTicker.C:
 				store.ResetDailyPnL()
-				solCB.ResetPauseCycles()
+				// Note: do NOT reset pause cycles here. The escalating pause
+				// (1h→2h→4h→8h) should persist until consecutive losses are
+				// broken by a win. Resetting hourly undermines the protection.
 				log.Info("hourly PnL reset")
 			}
 		}
@@ -609,6 +668,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-snapTicker.C:
+				store.SetCBState(state.ChainSolana, solCB.ExportState())
 				if err := store.SaveSnapshot(cfg.StateSnapshotPath); err != nil {
 					log.Warn("failed to save state snapshot", "err", err)
 				}
@@ -720,6 +780,7 @@ func main() {
 			rep.SaveReport(context.Background(), snap)
 
 			wg.Wait()
+			store.SetCBState(state.ChainSolana, solCB.ExportState())
 			if err := store.SaveSnapshot(cfg.StateSnapshotPath); err != nil {
 				log.Warn("failed to save state on shutdown", "err", err)
 			}

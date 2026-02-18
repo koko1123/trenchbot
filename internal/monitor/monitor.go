@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/cindocode/trenchbot/internal/clock"
@@ -53,6 +54,9 @@ func DefaultExitConfig() ExitConfig {
 	}
 }
 
+// TradeRecorder is called by the monitor to persist sell trades.
+type TradeRecorder func(ctx context.Context, posID string, chain state.Chain, tokenAddress, tokenSymbol string, sellPrice, amount, pnlPct, gasCost float64, reason string, shadow bool)
+
 type Monitor struct {
 	store           *state.Store
 	executors       map[state.Chain]executor.Executor
@@ -63,7 +67,9 @@ type Monitor struct {
 	shadow          bool
 	circuitBreakers map[state.Chain]*risk.CircuitBreaker
 	perfTracker     *risk.PerformanceTracker
+	tradeRecorder   TradeRecorder
 	onPositionClose func(chain state.Chain, tokenAddress string)
+	selling         sync.Map // posID -> struct{} — prevents concurrent sell attempts
 }
 
 func New(store *state.Store, executors map[state.Chain]executor.Executor, notifier notify.Notifier, exitCfg ExitConfig, clk clock.Clock, shadow bool, log *slog.Logger) *Monitor {
@@ -80,6 +86,10 @@ func New(store *state.Store, executors map[state.Chain]executor.Executor, notifi
 
 func (m *Monitor) SetCircuitBreakers(cbs map[state.Chain]*risk.CircuitBreaker) {
 	m.circuitBreakers = cbs
+}
+
+func (m *Monitor) SetTradeRecorder(tr TradeRecorder) {
+	m.tradeRecorder = tr
 }
 
 func (m *Monitor) SetPerformanceTracker(pt *risk.PerformanceTracker) {
@@ -261,6 +271,20 @@ func (m *Monitor) evaluateExit(ctx context.Context, pos *state.Position) {
 }
 
 func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct float64, reason string) {
+	// Prevent concurrent sell attempts for the same position.
+	if _, loaded := m.selling.LoadOrStore(pos.ID, struct{}{}); loaded {
+		return
+	}
+	defer m.selling.Delete(pos.ID)
+
+	// Re-read position to check it hasn't been closed by another goroutine.
+	fresh, ok := m.store.GetPosition(pos.ID)
+	if !ok || fresh.Closed {
+		return
+	}
+	// Use fresh position data for the sell.
+	pos = fresh
+
 	exec, ok := m.executors[pos.Chain]
 	if !ok {
 		m.log.Error("no executor for chain", "chain", pos.Chain)
@@ -409,6 +433,12 @@ func (m *Monitor) executeSell(ctx context.Context, pos *state.Position, sellPct 
 		"gas_cost", totalGas,
 		"tx", result.TxHash,
 	)
+
+	// Persist sell trade to Postgres.
+	if m.tradeRecorder != nil {
+		m.tradeRecorder(ctx, result.TxHash, pos.Chain, pos.TokenAddress, pos.TokenSymbol,
+			sellPrice, pos.Amount*partialFraction, pnlPct, result.GasCost, reason, m.shadow)
+	}
 
 	m.notifier.Exit(ctx, string(pos.Chain), pos.TokenSymbol, pos.TokenAddress, pnlPct, reason)
 

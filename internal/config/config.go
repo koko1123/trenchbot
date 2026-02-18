@@ -148,6 +148,18 @@ func (c *Config) validate() error {
 		if c.SolanaPrivateKey == "" {
 			return fmt.Errorf("live mode requires SOLANA_PRIVATE_KEY")
 		}
+		if c.TotalDrawdownLimitPct <= 0 || c.TotalDrawdownLimitPct > 100 {
+			return fmt.Errorf("live mode: TOTAL_DRAWDOWN_LIMIT_PCT must be in (0, 100], got %g", c.TotalDrawdownLimitPct)
+		}
+		if c.StopLossPct <= 0 || c.StopLossPct > 100 {
+			return fmt.Errorf("live mode: STOP_LOSS_PCT must be in (0, 100], got %g", c.StopLossPct)
+		}
+		if c.SentryDSN == "" {
+			return fmt.Errorf("live mode: SENTRY_DSN is required for alerting")
+		}
+		if c.SlippagePctSOL > 49 {
+			return fmt.Errorf("live mode: SLIPPAGE_PCT_SOL cannot exceed 49, got %d", c.SlippagePctSOL)
+		}
 	}
 
 	if c.MaxPositionsPerChain <= 0 {
