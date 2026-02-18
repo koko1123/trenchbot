@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -85,6 +86,10 @@ type Store struct {
 	gasBalance    map[Chain]float64
 	gasSpent      map[Chain]float64
 	reservedSlots map[Chain]int // reserved but not yet filled slots
+
+	// Token flow counters (atomic, no lock needed).
+	tokensSeen   atomic.Int64 // total tokens received from scanner
+	tokensPassed atomic.Int64 // tokens that passed filter scoring
 }
 
 func NewStore() *Store {
@@ -97,6 +102,18 @@ func NewStore() *Store {
 		reservedSlots: make(map[Chain]int),
 	}
 }
+
+// IncrTokensSeen atomically increments the tokens-seen counter.
+func (s *Store) IncrTokensSeen() { s.tokensSeen.Add(1) }
+
+// IncrTokensPassed atomically increments the tokens-passed counter.
+func (s *Store) IncrTokensPassed() { s.tokensPassed.Add(1) }
+
+// TokensSeen returns the total tokens received from the scanner.
+func (s *Store) TokensSeen() int64 { return s.tokensSeen.Load() }
+
+// TokensPassed returns the total tokens that passed filter scoring.
+func (s *Store) TokensPassed() int64 { return s.tokensPassed.Load() }
 
 func (s *Store) AddPosition(p *Position) {
 	s.mu.Lock()

@@ -766,6 +766,8 @@ func processToken(
 	cfg *config.Config,
 	log *slog.Logger,
 ) {
+	store.IncrTokensSeen()
+
 	result := f.Evaluate(ctx, token)
 
 	// Apply creator reputation score modifier.
@@ -789,6 +791,8 @@ func processToken(
 	if !result.Approved {
 		return
 	}
+
+	store.IncrTokensPassed()
 
 	// Volume-aware pre-buy check with order flow analysis (Phase 1).
 	var obsResult flow.ObservationResult

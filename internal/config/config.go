@@ -21,7 +21,7 @@ type Config struct {
 	// Risk
 	MaxPositionsPerChain       int     `envconfig:"MAX_CONCURRENT_POSITIONS_PER_CHAIN" default:"10"`
 	MaxPositionsTotal          int     `envconfig:"MAX_CONCURRENT_POSITIONS_TOTAL" default:"15"`
-	MaxSnipesPerHour           int     `envconfig:"MAX_SNIPES_PER_HOUR" default:"10"`
+	MaxSnipesPerHour           int     `envconfig:"MAX_SNIPES_PER_HOUR" default:"30"`
 	HeatFullPct                float64 `envconfig:"HEAT_FULL_PCT" default:"15"`
 	TotalDrawdownLimitPct      float64 `envconfig:"TOTAL_DRAWDOWN_LIMIT_PCT" default:"50"`
 	ConsecutiveLossPauseThresh int     `envconfig:"CONSECUTIVE_LOSS_PAUSE_THRESHOLD" default:"10"`
