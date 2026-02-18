@@ -47,7 +47,7 @@ type Config struct {
 	MinGasReserveBNB float64 `envconfig:"MIN_GAS_RESERVE_BNB" default:"0.002"`
 
 	// Filter
-	MinScoreThreshold int `envconfig:"MIN_SCORE_THRESHOLD" default:"60"`
+	MinScoreThreshold int `envconfig:"MIN_SCORE_THRESHOLD" default:"40"`
 
 	// PostgreSQL
 	DatabaseURL string `envconfig:"DATABASE_URL"`
