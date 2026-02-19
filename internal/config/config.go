@@ -24,7 +24,7 @@ type Config struct {
 	MaxSnipesPerHour           int     `envconfig:"MAX_SNIPES_PER_HOUR" default:"30"`
 	HeatFullPct                float64 `envconfig:"HEAT_FULL_PCT" default:"15"`
 	TotalDrawdownLimitPct      float64 `envconfig:"TOTAL_DRAWDOWN_LIMIT_PCT" default:"50"`
-	ConsecutiveLossPauseThresh int     `envconfig:"CONSECUTIVE_LOSS_PAUSE_THRESHOLD" default:"10"`
+	ConsecutiveLossPauseThresh int     `envconfig:"CONSECUTIVE_LOSS_PAUSE_THRESHOLD" default:"15"`
 
 	// Gas
 	GasBudgetSOL     float64 `envconfig:"GAS_BUDGET_SOL" default:"0.25"`
@@ -38,19 +38,20 @@ type Config struct {
 	// Execution
 	SlippagePctSOL       int `envconfig:"SLIPPAGE_PCT_SOL" default:"25"`
 	MaxConcurrentBuys    int `envconfig:"MAX_CONCURRENT_BUYS" default:"10"`
+	SnipeCooldownSec     int `envconfig:"SNIPE_COOLDOWN_SEC" default:"15"`
 
 	// Exit strategy
-	StopLossPct              float64 `envconfig:"STOP_LOSS_PCT" default:"30"`
+	StopLossPct              float64 `envconfig:"STOP_LOSS_PCT" default:"40"`
 	Tranche1X                float64 `envconfig:"TRANCHE1_X" default:"1.5"`
-	UniversalTrailingThreshold float64 `envconfig:"TRAILING_THRESHOLD" default:"1.15"`
+	UniversalTrailingThreshold float64 `envconfig:"TRAILING_THRESHOLD" default:"1.25"`
 	UniversalTrailingStop    float64 `envconfig:"TRAILING_STOP_PCT" default:"20"`
-	NoTradeTimeoutSec        int     `envconfig:"NO_TRADE_TIMEOUT_S" default:"120"`
+	NoTradeTimeoutSec        int     `envconfig:"NO_TRADE_TIMEOUT_S" default:"60"`
 	NoTradeMaxMult           float64 `envconfig:"NO_TRADE_MAX_MULT" default:"1.1"`
-	MinTradesBeforeBuy       int     `envconfig:"MIN_TRADES_BEFORE_BUY" default:"5"`
+	MinTradesBeforeBuy       int     `envconfig:"MIN_TRADES_BEFORE_BUY" default:"3"`
 	TradeObservationSecs     int     `envconfig:"TRADE_OBSERVATION_SECS" default:"5"`
 
 	// Order flow intelligence (Phase 1)
-	MinOFIThreshold          float64 `envconfig:"MIN_OFI_THRESHOLD" default:"0.3"`
+	MinOFIThreshold          float64 `envconfig:"MIN_OFI_THRESHOLD" default:"0.15"`
 	MaxObservationGrowthPct  float64 `envconfig:"MAX_OBSERVATION_GROWTH_PCT" default:"500"`
 	MinObservationGrowthPct  float64 `envconfig:"MIN_OBSERVATION_GROWTH_PCT" default:"0"`
 	MinTradeTimingCV         float64 `envconfig:"MIN_TRADE_TIMING_CV" default:"0.3"`
@@ -85,7 +86,7 @@ type Config struct {
 	GasRefuelCooldownMin     int     `envconfig:"GAS_REFUEL_COOLDOWN_MIN" default:"5"`
 
 	// Quantitative selection engine
-	MinLiquidityVelocity     float64 `envconfig:"MIN_LIQUIDITY_VELOCITY" default:"0.05"`
+	MinLiquidityVelocity     float64 `envconfig:"MIN_LIQUIDITY_VELOCITY" default:"0.10"`
 	MaxOFIDeceleration       float64 `envconfig:"MAX_OFI_DECELERATION" default:"-0.3"`
 	PreGradExitProgress      float64 `envconfig:"PRE_GRADUATION_EXIT_PROGRESS" default:"0.90"`
 	CUSUMEnabled             bool    `envconfig:"CUSUM_ENABLED" default:"true"`

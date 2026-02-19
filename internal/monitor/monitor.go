@@ -192,6 +192,13 @@ func (m *Monitor) evaluateExit(ctx context.Context, pos *state.Position) {
 		return
 	}
 
+	// CUSUM early exit: anomaly-detected dump while position is significantly underwater.
+	// Exit at -20% instead of waiting for the hard stop-loss (-40%).
+	if pos.CUSUMSellOnset && multiplier < 0.80 {
+		m.executeSell(ctx, pos, 100-pos.SoldPct, "cusum-early-exit")
+		return
+	}
+
 	// Tranche 1: sell 25% at 2x
 	if multiplier >= m.exitCfg.Tranche1X && pos.SoldPct < m.exitCfg.Tranche1Pct {
 		m.executeSell(ctx, pos, m.exitCfg.Tranche1Pct, "tranche-1")

@@ -182,7 +182,9 @@ func main() {
 	rep.SetCircuitBreaker(state.ChainSolana, solCB)
 
 	tokenFilter := filter.New(cfg.MinScoreThreshold, log)
-	tokenFilter.SetDynamicThreshold(80, solCB.Heat)
+	// Heat no longer drives filter threshold — tokens cluster at exactly 55
+	// and a 1-point increase blocks 100% of them. Heat still affects position
+	// sizing via the position sizer.
 
 	// Wire honeypot checker if enabled.
 	if cfg.HoneypotCheckEnabled {
@@ -338,42 +340,40 @@ func main() {
 			return
 		}
 		creator := creatorVal.(string)
-		// Find the position by token address to get peak mult.
-		for _, pos := range store.AllOpenPositions() {
-			if pos.TokenAddress != tokenAddress {
-				continue
-			}
-			peakMult := 1.0
-			if pos.EntryPrice > 0 {
-				peakMult = pos.PeakPrice / pos.EntryPrice
-			}
-			isRug := peakMult < 0.3
-			reputationDB.RecordOutcome(creator, peakMult, pos.HoldDuration, isRug)
+		// Find the position by token address (including closed positions).
+		pos, found := store.FindPositionByToken(tokenAddress)
+		if !found {
+			return
+		}
+		peakMult := 1.0
+		if pos.EntryPrice > 0 {
+			peakMult = pos.PeakPrice / pos.EntryPrice
+		}
+		isRug := peakMult < 0.3
+		reputationDB.RecordOutcome(creator, peakMult, pos.HoldDuration, isRug)
 
-			// Update Thompson sampler with outcome.
-			if thompsonSampler != nil {
-				obs := flow.ObservationResult{
-					OFI:               pos.OFI,
-					LiquidityVelocity: pos.LiquidityVelocity,
-					BotBuyCount:       pos.BotBuyCount,
-				}
-				bucketKey := flow.BucketKey(obs, pos.FilterScore)
-				won := peakMult > 1.5
-				thompsonSampler.Update(bucketKey, won)
+		// Update Thompson sampler with outcome.
+		if thompsonSampler != nil {
+			obs := flow.ObservationResult{
+				OFI:               pos.OFI,
+				LiquidityVelocity: pos.LiquidityVelocity,
+				BotBuyCount:       pos.BotBuyCount,
 			}
+			bucketKey := flow.BucketKey(obs, pos.FilterScore)
+			won := peakMult > 1.5
+			thompsonSampler.Update(bucketKey, won)
+		}
 
-			// Close observation in Postgres for survival model training.
-			if reportStore != nil {
-				pnlPct := (peakMult - 1.0) * 100
-				if pos.PnL != 0 {
-					pnlPct = pos.PnL
-				}
-				holdSec := pos.HoldDuration.Seconds()
-				if err := reportStore.CloseObservation(ctx, pos.ID, holdSec, pnlPct, peakMult, pos.ExitReason); err != nil {
-					log.Warn("failed to close observation", "err", err)
-				}
+		// Close observation in Postgres for survival model training.
+		if reportStore != nil {
+			pnlPct := (peakMult - 1.0) * 100
+			if pos.PnL != 0 {
+				pnlPct = pos.PnL
 			}
-			break
+			holdSec := pos.HoldDuration.Seconds()
+			if err := reportStore.CloseObservation(ctx, pos.ID, holdSec, pnlPct, peakMult, pos.ExitReason); err != nil {
+				log.Warn("failed to close observation", "err", err)
+			}
 		}
 	})
 
@@ -397,16 +397,14 @@ func main() {
 		origMaxPositions := cfg.MaxPositionsTotal
 		alphaMonitor := risk.NewAlphaMonitor(perfTracker, risk.AlphaMonitorConfig{}, log)
 		alphaMonitor.SetOnDegrade(func() {
-			tokenFilter.SetDynamicThreshold(90, solCB.Heat) // tighten threshold
 			sizer.SetMaxPositions(origMaxPositions / 2)
-			log.Warn("alpha degradation: tightened filter and reduced positions")
+			log.Warn("alpha degradation: reduced positions")
 		})
 		alphaMonitor.SetOnRecover(func() {
-			tokenFilter.SetDynamicThreshold(80, solCB.Heat) // restore
 			sizer.SetMaxPositions(origMaxPositions)
-			log.Info("alpha recovered: restored filter and positions")
+			log.Info("alpha recovered: restored positions")
 		})
-		_ = origMinScore // used by degrade/recover callbacks via closure
+		_ = origMinScore
 
 		wg.Add(1)
 		go func() {
@@ -511,9 +509,12 @@ func main() {
 								"mint", trade.Mint,
 								"sol_amount", trade.SolAmount,
 							)
-							// Trigger immediate exit evaluation for all positions with this mint.
+							// Flag positions with CUSUM sell-onset and trigger immediate exit evaluation.
 							for _, pos := range store.AllOpenPositions() {
 								if pos.TokenAddress == trade.Mint {
+									store.UpdatePosition(pos.ID, func(p *state.Position) {
+										p.CUSUMSellOnset = true
+									})
 									mon.EvaluatePosition(ctx, pos.ID)
 								}
 							}
@@ -802,6 +803,12 @@ func main() {
 	}
 }
 
+// Inter-buy cooldown: prevents burst trading by enforcing minimum time between buys.
+var (
+	lastBuyMu   sync.Mutex
+	lastBuyTime time.Time
+)
+
 func processToken(
 	ctx context.Context,
 	token scanner.NewToken,
@@ -1088,6 +1095,21 @@ func processToken(
 		return
 	}
 
+	// Inter-buy cooldown: spread risk by enforcing minimum time between buys.
+	if cfg.SnipeCooldownSec > 0 {
+		lastBuyMu.Lock()
+		elapsed := time.Since(lastBuyTime)
+		lastBuyMu.Unlock()
+		cooldown := time.Duration(cfg.SnipeCooldownSec) * time.Second
+		if elapsed < cooldown {
+			log.Debug("snipe cooldown active", "chain", token.Chain, "token", token.Symbol, "remaining", cooldown-elapsed)
+			if token.Chain == state.ChainSolana {
+				pumpScanner.UnsubscribeToken(token.Address)
+			}
+			return
+		}
+	}
+
 	if !store.TryReserveSlot(token.Chain, sizer.DynamicMaxPerChain(token.Chain), sizer.DynamicMaxTotal()) {
 		log.Debug("position limit reached", "chain", token.Chain)
 		if token.Chain == state.ChainSolana {
@@ -1146,6 +1168,11 @@ func processToken(
 	}
 
 	solCB.RecordSnipe()
+
+	// Update inter-buy cooldown timestamp.
+	lastBuyMu.Lock()
+	lastBuyTime = time.Now()
+	lastBuyMu.Unlock()
 
 	// Deduct buy gas.
 	store.DeductGas(token.Chain, buyResult.GasCost)

@@ -58,6 +58,9 @@ type Position struct {
 	ExitReason   string        `json:"exit_reason,omitempty"`
 	HoldDuration time.Duration `json:"hold_duration,omitempty"`
 
+	// CUSUM anomaly detection (Phase 5C).
+	CUSUMSellOnset bool `json:"-"` // set when CUSUM detects sell-onset for this position
+
 	// Sell pressure tracking (Phase 5B).
 	RecentLargeSells int       `json:"-"` // large sells in last 30s (not persisted)
 	LastLargeSellAt  time.Time `json:"-"`
@@ -178,6 +181,19 @@ func (s *Store) OpenPositionCount(chain Chain) int {
 
 func (s *Store) TotalOpenPositionCount() int {
 	return len(s.AllOpenPositions())
+}
+
+// FindPositionByToken returns the most recently added position for a token address
+// (open or closed). Used by close callbacks that fire after the position is marked closed.
+func (s *Store) FindPositionByToken(tokenAddress string) (*Position, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.positions {
+		if p.TokenAddress == tokenAddress {
+			return p, true
+		}
+	}
+	return nil, false
 }
 
 func (s *Store) AddTrade(t Trade) {

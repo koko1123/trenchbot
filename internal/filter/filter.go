@@ -256,6 +256,14 @@ func (f *Filter) scoreMomentum(token scanner.NewToken) (int, []string) {
 				score += 5
 				reasons = append(reasons, "initial buy > 1.0 SOL (+5)")
 			}
+			if buy > 2.0 {
+				score += 5
+				reasons = append(reasons, "initial buy > 2.0 SOL (+5)")
+			}
+			if buy > 5.0 {
+				score += 5
+				reasons = append(reasons, "initial buy > 5.0 SOL (+5)")
+			}
 		}
 	}
 
@@ -308,6 +316,10 @@ func (f *Filter) scoreChainSpecific(token scanner.NewToken) (int, []string) {
 			if mc > 30 {
 				score += 5
 				reasons = append(reasons, "mcap > 30 SOL (+5)")
+			}
+			if mc > 50 {
+				score += 5
+				reasons = append(reasons, "mcap > 50 SOL (+5)")
 			}
 		}
 	}
