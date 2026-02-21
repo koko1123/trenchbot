@@ -141,12 +141,31 @@ func (ps *PositionSizer) DynamicMaxTotal() int {
 	return ps.dynamicMaxTotal
 }
 
+// SurvivalScoreMultiplier scales position size based on survival model score.
+// Higher score = better predicted survival = larger position.
+func SurvivalScoreMultiplier(score float64) float64 {
+	if score < 0 {
+		return 0.6
+	}
+	if score > 1 {
+		return 1.25
+	}
+	// Linear interpolation: 0 → 1.0, 1 → 1.25
+	return 1.0 + score*0.25
+}
+
 // SizeWithLiquidity computes position size with a liquidity-aware cap.
 // mcapSOL is the current market cap in SOL; if > 0 and maxImpactPct is set,
 // the returned size is capped so the trade doesn't move the bonding curve
 // by more than maxImpactPct.
-func (ps *PositionSizer) SizeWithLiquidity(chain state.Chain, score int, mcapSOL float64) float64 {
+// survivalScore is optional (-999 means not available); when set it scales the size.
+func (ps *PositionSizer) SizeWithLiquidity(chain state.Chain, score int, mcapSOL float64, survivalScore ...float64) float64 {
 	size := ps.Size(chain, score)
+
+	// Apply survival model scaling if provided.
+	if len(survivalScore) > 0 && survivalScore[0] > -999 {
+		size *= SurvivalScoreMultiplier(survivalScore[0])
+	}
 	if size <= 0 || ps.maxImpactPct <= 0 || mcapSOL <= 0 {
 		return size
 	}

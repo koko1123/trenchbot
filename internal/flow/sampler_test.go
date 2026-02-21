@@ -67,16 +67,20 @@ func TestBucketKey_Discretization(t *testing.T) {
 		expected string
 	}{
 		{
-			obs:      ObservationResult{OFI: 0.1, LiquidityVelocity: 0.01, BotBuyCount: 0},
-			expected: "ofi_lo:vel_lo:bot_no",
+			obs:      ObservationResult{OFI: 0.1, LiquidityVelocity: 0.01, CurveProgress: 0.02},
+			expected: "ofi_lo:vel_lo:curve_early",
 		},
 		{
-			obs:      ObservationResult{OFI: 0.8, LiquidityVelocity: 0.5, BotBuyCount: 5},
-			expected: "ofi_hi:vel_hi:bot_yes",
+			obs:      ObservationResult{OFI: 0.8, LiquidityVelocity: 0.5, CurveProgress: 0.03},
+			expected: "ofi_toxic:vel_hi:curve_early",
 		},
 		{
-			obs:      ObservationResult{OFI: 0.4, LiquidityVelocity: 0.1, BotBuyCount: 1},
-			expected: "ofi_mid:vel_mid:bot_no",
+			obs:      ObservationResult{OFI: 0.4, LiquidityVelocity: 0.2, CurveProgress: 0.08},
+			expected: "ofi_sweet:vel_sweet:curve_mid",
+		},
+		{
+			obs:      ObservationResult{OFI: 0.96, LiquidityVelocity: 0.25, CurveProgress: 0.01},
+			expected: "ofi_hi:vel_sweet:curve_early",
 		},
 	}
 	for _, tt := range tests {

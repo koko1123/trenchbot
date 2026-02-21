@@ -224,6 +224,62 @@ func (c *Client) GetTokenHolders(ctx context.Context, mint string) (HolderDistri
 	return dist, nil
 }
 
+// GetCreatorTokenHistory queries Helius DAS searchAssets to find how many tokens
+// a creator has previously launched. Returns the total count.
+func (c *Client) GetCreatorTokenHistory(ctx context.Context, creator string) (int, error) {
+	if c.heliusKey == "" {
+		return 0, fmt.Errorf("helius API key not configured")
+	}
+
+	url := fmt.Sprintf("https://mainnet.helius-rpc.com/?api-key=%s", c.heliusKey)
+	payload := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "searchAssets",
+		"params": map[string]interface{}{
+			"creatorAddress": creator,
+			"page":           1,
+			"limit":          1, // we only need the total count
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("helius searchAssets request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("helius returned status %d: %s", resp.StatusCode, string(respBody[:min(len(respBody), 200)]))
+	}
+
+	var result struct {
+		Result struct {
+			Total int `json:"total"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return 0, fmt.Errorf("decode response: %w", err)
+	}
+
+	return result.Result.Total, nil
+}
+
 // PriorityFeeEstimate holds Helius priority fee recommendations.
 type PriorityFeeEstimate struct {
 	Low      float64 // in SOL

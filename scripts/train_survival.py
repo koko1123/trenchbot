@@ -133,8 +133,15 @@ def main():
     else:
         print("  Acceptable. Deploy and retrain monthly.")
 
+    # Save feature means for centering at runtime.
+    # Cox PH linear predictor should be sum(beta_i * (x_i - mean_i)).
+    means = [float(cox_df[f].mean()) for f in FEATURES]
+    print("\nFeature means (for centering):")
+    for f, m in zip(FEATURES, means):
+        print(f"  {f:25s}: {m:.4f}")
+
     # Write JSON
-    model = {"features": FEATURES, "betas": betas}
+    model = {"features": FEATURES, "betas": betas, "means": means}
     output = "survival_model.json"
     with open(output, "w") as f:
         json.dump(model, f, indent=2)

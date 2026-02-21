@@ -60,30 +60,33 @@ func (ts *ThompsonSampler) Update(key string, won bool) {
 }
 
 // BucketKey discretizes a token into a type key based on its features.
-// OFI bucket (3) × Velocity bucket (3) × Bot presence (2) = 18 buckets.
+// OFI bucket (4) × Velocity bucket (3) × Curve progress (2) = 24 buckets.
+// Boundaries aligned to data-identified sweet spots from 78 observations.
 func BucketKey(obs ObservationResult, filterScore int) string {
-	ofiBucket := "mid"
+	ofiBucket := "sweet" // 0.30-0.60: 33% WR, +5.1%
 	switch {
-	case obs.OFI < 0.3:
+	case obs.OFI < 0.30:
 		ofiBucket = "lo"
-	case obs.OFI > 0.6:
-		ofiBucket = "hi"
+	case obs.OFI >= 0.95:
+		ofiBucket = "hi" // >=0.95: 46% WR (organic momentum)
+	case obs.OFI >= 0.60:
+		ofiBucket = "toxic" // 0.60-0.95: 18% WR (partial coordination)
 	}
 
-	velBucket := "mid"
+	velBucket := "sweet" // 0.15-0.30: 41% WR, +4.5%
 	switch {
-	case obs.LiquidityVelocity < 0.05:
+	case obs.LiquidityVelocity < 0.15:
 		velBucket = "lo"
-	case obs.LiquidityVelocity > 0.2:
+	case obs.LiquidityVelocity > 0.30:
 		velBucket = "hi"
 	}
 
-	botPresent := "no"
-	if obs.BotBuyCount > 2 {
-		botPresent = "yes"
+	curveBucket := "early" // <5%: 44% WR, +10%
+	if obs.CurveProgress >= 0.05 {
+		curveBucket = "mid"
 	}
 
-	return fmt.Sprintf("ofi_%s:vel_%s:bot_%s", ofiBucket, velBucket, botPresent)
+	return fmt.Sprintf("ofi_%s:vel_%s:curve_%s", ofiBucket, velBucket, curveBucket)
 }
 
 // WinRate returns the expected win rate for a bucket (posterior mean).

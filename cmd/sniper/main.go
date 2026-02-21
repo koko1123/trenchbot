@@ -203,6 +203,12 @@ func main() {
 		log.Info("holder distribution checking enabled", "max_top_holder_pct", cfg.MaxTopHolderPct)
 	}
 
+	// Wire on-chain creator history via Helius searchAssets.
+	if cfg.HeliusAPIKey != "" {
+		tokenFilter.SetOnChainCreatorLookup(solClient)
+		log.Info("on-chain creator history checking enabled")
+	}
+
 	executors := make(map[state.Chain]executor.Executor)
 	pumpExec := executor.NewPumpFunExecutor(cfg.PumpPortalTradeURL, solClient, cfg.SlippagePctSOL, log)
 
@@ -246,6 +252,8 @@ func main() {
 	exitCfg.UniversalTrailingStop = cfg.UniversalTrailingStop
 	exitCfg.NoTradeTimeout = time.Duration(cfg.NoTradeTimeoutSec) * time.Second
 	exitCfg.NoTradeMaxMult = cfg.NoTradeMaxMult
+	exitCfg.NoTradeTimeoutFast = time.Duration(cfg.NoTradeTimeoutFastSec) * time.Second
+	exitCfg.NoTradeFastMaxMult = cfg.NoTradeFastMaxMult
 	exitCfg.PreGradExitProgress = cfg.PreGradExitProgress
 	mon := monitor.New(store, executors, notifier, exitCfg, clk, !cfg.IsLive(), log)
 
@@ -504,12 +512,25 @@ func main() {
 					if v, ok := positionAnomalyDetectors.Load(trade.Mint); ok {
 						detector := v.(*flow.TokenAnomalyDetector)
 						sig := detector.Feed(trade.TxType, trade.SolAmount, time.Now())
+						// Require 2+ concurrent CUSUM signals for a real dump.
+						// SellOnset alone fires too easily (0% win rate on 18 exits).
+						signalCount := 0
 						if sig.SellOnset {
-							log.Info("CUSUM sell onset detected for open position",
+							signalCount++
+						}
+						if sig.BuyCollapse {
+							signalCount++
+						}
+						if sig.SizeShift {
+							signalCount++
+						}
+						if signalCount >= 2 {
+							log.Info("CUSUM multi-signal dump detected for open position",
 								"mint", trade.Mint,
-								"sol_amount", trade.SolAmount,
+								"sell_onset", sig.SellOnset,
+								"buy_collapse", sig.BuyCollapse,
+								"size_shift", sig.SizeShift,
 							)
-							// Flag positions with CUSUM sell-onset and trigger immediate exit evaluation.
 							for _, pos := range store.AllOpenPositions() {
 								if pos.TokenAddress == trade.Mint {
 									store.UpdatePosition(pos.ID, func(p *state.Position) {
@@ -862,8 +883,21 @@ func processToken(
 
 	store.IncrTokensPassed()
 
+	// Dead zone filter: skip sniping during hours with historically 0% win rate.
+	if cfg.DeadZoneEnabled {
+		hour := time.Now().UTC().Hour()
+		if hour >= cfg.DeadZoneStartUTC && hour < cfg.DeadZoneEndUTC {
+			log.Debug("dead zone active, skipping token",
+				"token", token.Symbol,
+				"hour_utc", hour,
+			)
+			return
+		}
+	}
+
 	// Volume-aware pre-buy check with order flow analysis (Phase 1).
 	var obsResult flow.ObservationResult
+	survScore := -999.0 // sentinel: no survival model
 	if cfg.MinTradesBeforeBuy > 0 && token.Chain == state.ChainSolana {
 		observer := flow.NewObserver()
 		tradeObservers.Store(token.Address, observer)
@@ -1020,6 +1054,74 @@ func processToken(
 			return
 		}
 
+		// Max liquidity velocity: pump-and-dump filter. Velocity > 0.40 has -14% avg PnL.
+		if cfg.MaxLiquidityVelocity > 0 && obsResult.LiquidityVelocity > cfg.MaxLiquidityVelocity {
+			log.Debug("token failed max liquidity velocity check, skipping",
+				"token", token.Symbol,
+				"velocity", obsResult.LiquidityVelocity,
+				"max", cfg.MaxLiquidityVelocity,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// Max OFI cap (disabled by default — use toxic zone instead).
+		if cfg.MaxOFIThreshold > 0 && obsResult.OFI > cfg.MaxOFIThreshold {
+			log.Debug("token failed max OFI check, skipping",
+				"token", token.Symbol,
+				"ofi", obsResult.OFI,
+				"max", cfg.MaxOFIThreshold,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// OFI toxic zone: 0.60-0.95 is partial coordination that dumps post-entry.
+		// OFI >=0.95 is organic all-buy momentum (46% WR). OFI 0.30-0.60 is sweet spot.
+		if cfg.OFIToxicLow > 0 && cfg.OFIToxicHigh > 0 &&
+			obsResult.OFI >= cfg.OFIToxicLow && obsResult.OFI < cfg.OFIToxicHigh {
+			log.Debug("token in OFI toxic zone, skipping",
+				"token", token.Symbol,
+				"ofi", obsResult.OFI,
+				"toxic_range", fmt.Sprintf("[%.2f, %.2f)", cfg.OFIToxicLow, cfg.OFIToxicHigh),
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// Curve progress cap: tokens far along the bonding curve have less upside.
+		if cfg.MaxCurveProgressEntry > 0 && obsResult.CurveProgress > cfg.MaxCurveProgressEntry {
+			log.Debug("token failed curve progress check, skipping",
+				"token", token.Symbol,
+				"curve_progress", obsResult.CurveProgress,
+				"max", cfg.MaxCurveProgressEntry,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// Trade entropy ceiling: high entropy = chaotic diverse trade sizes (bots).
+		if cfg.MaxTradeEntropy > 0 && obsResult.TradeEntropy > cfg.MaxTradeEntropy {
+			log.Debug("token failed trade entropy check, skipping",
+				"token", token.Symbol,
+				"entropy", obsResult.TradeEntropy,
+				"max", cfg.MaxTradeEntropy,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
+		// Max buy count: too many buyers during observation = crowded trade.
+		if cfg.MaxBuyCount > 0 && obsResult.BuyCount > cfg.MaxBuyCount {
+			log.Debug("token failed max buy count check, skipping",
+				"token", token.Symbol,
+				"buy_count", obsResult.BuyCount,
+				"max", cfg.MaxBuyCount,
+			)
+			pumpScanner.UnsubscribeToken(token.Address)
+			return
+		}
+
 		// OFI acceleration check: fading buy pressure = likely top.
 		if cfg.MaxOFIDeceleration != 0 && obsResult.OFIAcceleration < cfg.MaxOFIDeceleration {
 			log.Debug("token OFI decelerating, skipping",
@@ -1044,8 +1146,9 @@ func processToken(
 		}
 
 		// Survival model: meta-filter combining all signals through trained lens.
+		// Score is also used later for position sizing.
 		if survivalModel != nil {
-			survScore := survivalModel.SurvivalScore(obsResult, result.Score)
+			survScore = survivalModel.SurvivalScore(obsResult, result.Score)
 			if survScore < -0.5 {
 				log.Debug("token failed survival model check, skipping",
 					"token", token.Symbol,
@@ -1126,7 +1229,7 @@ func processToken(
 		}
 	}
 
-	size := sizer.SizeWithLiquidity(token.Chain, result.Score, mcapSOL)
+	size := sizer.SizeWithLiquidity(token.Chain, result.Score, mcapSOL, survScore)
 	if size <= 0 {
 		log.Debug("position size zero (liquidity too thin or gas low)",
 			"token", token.Symbol,

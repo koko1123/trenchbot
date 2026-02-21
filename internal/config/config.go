@@ -45,8 +45,15 @@ type Config struct {
 	Tranche1X                float64 `envconfig:"TRANCHE1_X" default:"1.5"`
 	UniversalTrailingThreshold float64 `envconfig:"TRAILING_THRESHOLD" default:"1.25"`
 	UniversalTrailingStop    float64 `envconfig:"TRAILING_STOP_PCT" default:"20"`
-	NoTradeTimeoutSec        int     `envconfig:"NO_TRADE_TIMEOUT_S" default:"60"`
-	NoTradeMaxMult           float64 `envconfig:"NO_TRADE_MAX_MULT" default:"1.1"`
+	NoTradeTimeoutSec        int     `envconfig:"NO_TRADE_TIMEOUT_S" default:"90"`
+	NoTradeMaxMult           float64 `envconfig:"NO_TRADE_MAX_MULT" default:"1.05"`
+	NoTradeTimeoutFastSec    int     `envconfig:"NO_TRADE_TIMEOUT_FAST_S" default:"30"`
+	NoTradeFastMaxMult       float64 `envconfig:"NO_TRADE_FAST_MAX_MULT" default:"0.90"`
+
+	// Dead zone — skip sniping during hours with 0% historical win rate
+	DeadZoneEnabled          bool `envconfig:"DEAD_ZONE_ENABLED" default:"true"`
+	DeadZoneStartUTC         int  `envconfig:"DEAD_ZONE_START_UTC" default:"10"`
+	DeadZoneEndUTC           int  `envconfig:"DEAD_ZONE_END_UTC" default:"13"`
 	MinTradesBeforeBuy       int     `envconfig:"MIN_TRADES_BEFORE_BUY" default:"3"`
 	TradeObservationSecs     int     `envconfig:"TRADE_OBSERVATION_SECS" default:"5"`
 
@@ -58,7 +65,7 @@ type Config struct {
 
 	// On-chain intelligence (Phase 2)
 	HeliusAPIKey             string  `envconfig:"HELIUS_API_KEY"`
-	HolderCheckEnabled       bool    `envconfig:"HOLDER_CHECK_ENABLED" default:"false"`
+	HolderCheckEnabled       bool    `envconfig:"HOLDER_CHECK_ENABLED" default:"true"`
 	MaxTopHolderPct          float64 `envconfig:"MAX_TOP_HOLDER_PCT" default:"50"`
 	BundleDetectionEnabled   bool    `envconfig:"BUNDLE_DETECTION_ENABLED" default:"false"`
 
@@ -86,14 +93,21 @@ type Config struct {
 	GasRefuelCooldownMin     int     `envconfig:"GAS_REFUEL_COOLDOWN_MIN" default:"5"`
 
 	// Quantitative selection engine
-	MinLiquidityVelocity     float64 `envconfig:"MIN_LIQUIDITY_VELOCITY" default:"0.10"`
+	MinLiquidityVelocity     float64 `envconfig:"MIN_LIQUIDITY_VELOCITY" default:"0.15"`
+	MaxLiquidityVelocity     float64 `envconfig:"MAX_LIQUIDITY_VELOCITY" default:"0.30"`
+	MaxOFIThreshold          float64 `envconfig:"MAX_OFI_THRESHOLD" default:"0"`
+	OFIToxicLow              float64 `envconfig:"OFI_TOXIC_LOW" default:"0.60"`
+	OFIToxicHigh             float64 `envconfig:"OFI_TOXIC_HIGH" default:"0.95"`
 	MaxOFIDeceleration       float64 `envconfig:"MAX_OFI_DECELERATION" default:"-0.3"`
+	MaxCurveProgressEntry    float64 `envconfig:"MAX_CURVE_PROGRESS_ENTRY" default:"0.10"`
+	MaxTradeEntropy          float64 `envconfig:"MAX_TRADE_ENTROPY" default:"1.0"`
+	MaxBuyCount              int     `envconfig:"MAX_BUY_COUNT" default:"7"`
 	PreGradExitProgress      float64 `envconfig:"PRE_GRADUATION_EXIT_PROGRESS" default:"0.90"`
 	CUSUMEnabled             bool    `envconfig:"CUSUM_ENABLED" default:"true"`
 	AdaptiveObservation      bool    `envconfig:"ADAPTIVE_OBSERVATION" default:"false"`
 	ObservationMaxSecs       int     `envconfig:"OBSERVATION_MAX_SECS" default:"10"`
-	SurvivalModelPath        string  `envconfig:"SURVIVAL_MODEL_PATH"`
-	ThompsonSamplingEnabled  bool    `envconfig:"THOMPSON_SAMPLING_ENABLED" default:"false"`
+	SurvivalModelPath        string  `envconfig:"SURVIVAL_MODEL_PATH" default:"survival_model.json"`
+	ThompsonSamplingEnabled  bool    `envconfig:"THOMPSON_SAMPLING_ENABLED" default:"true"`
 
 	// Bot dump exploitation (Phase 3D)
 	BotDumpDelayEnabled bool `envconfig:"BOT_DUMP_DELAY_ENABLED" default:"false"`

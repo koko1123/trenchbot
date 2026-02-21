@@ -21,6 +21,11 @@ type HolderChecker interface {
 	GetTokenHolders(ctx context.Context, mint string) (HolderDistribution, error)
 }
 
+// OnChainCreatorLookup provides creator token launch history from Helius.
+type OnChainCreatorLookup interface {
+	GetCreatorTokenHistory(ctx context.Context, creator string) (totalTokens int, err error)
+}
+
 // HolderDistribution holds the analysis of a token's holder distribution.
 type HolderDistribution struct {
 	TotalHolders  int
@@ -43,8 +48,9 @@ type Filter struct {
 	log              *slog.Logger
 	creatorLookup    CreatorLookup
 	honeypotChecker  *HoneypotChecker
-	holderChecker    HolderChecker
-	maxTopHolderPct  float64 // max top holder percentage before penalty (default 50)
+	holderChecker        HolderChecker
+	maxTopHolderPct      float64 // max top holder percentage before penalty (default 50)
+	onChainCreatorLookup OnChainCreatorLookup
 }
 
 func New(minScore int, log *slog.Logger) *Filter {
@@ -69,6 +75,11 @@ func (f *Filter) SetDynamicThreshold(maxMinScore int, heatFn func() float64) {
 // SetHoneypotChecker enables pre-buy honeypot detection via GoPlus API.
 func (f *Filter) SetHoneypotChecker(hc *HoneypotChecker) {
 	f.honeypotChecker = hc
+}
+
+// SetOnChainCreatorLookup enables on-chain creator history checking via Helius.
+func (f *Filter) SetOnChainCreatorLookup(cl OnChainCreatorLookup) {
+	f.onChainCreatorLookup = cl
 }
 
 // SetHolderChecker enables on-chain holder distribution checking.
@@ -224,6 +235,21 @@ func (f *Filter) scoreCreator(ctx context.Context, token scanner.NewToken) (int,
 			} else if total >= 3 && rugRate < 0.3 {
 				score += 10
 				reasons = append(reasons, fmt.Sprintf("clean creator: %d tokens, %d rugs (+10)", total, rugs))
+			}
+		}
+	}
+
+	// On-chain creator history via Helius (broader than our Postgres data).
+	if f.onChainCreatorLookup != nil && token.Creator != "" {
+		totalTokens, err := f.onChainCreatorLookup.GetCreatorTokenHistory(ctx, token.Creator)
+		if err == nil {
+			switch {
+			case totalTokens >= 10:
+				score -= 10
+				reasons = append(reasons, fmt.Sprintf("serial launcher: %d prior tokens (-10)", totalTokens))
+			case totalTokens >= 1 && totalTokens <= 3:
+				score += 5
+				reasons = append(reasons, fmt.Sprintf("experienced creator: %d prior tokens (+5)", totalTokens))
 			}
 		}
 	}

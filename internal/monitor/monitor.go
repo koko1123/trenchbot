@@ -29,8 +29,10 @@ type ExitConfig struct {
 	StaleMultiplierThreshold float64 // positions above this multiplier are not considered stale (default 1.5)
 	UniversalTrailingThreshold float64       // peak multiplier above which universal trailing activates (e.g. 1.15)
 	UniversalTrailingStop      float64       // % drop from peak to exit any position (e.g. 20%)
-	NoTradeTimeout             time.Duration // exit if no trade events for this long (e.g. 2m)
-	NoTradeMaxMult             float64       // only exit dead tokens below this multiplier (e.g. 1.1)
+	NoTradeTimeout             time.Duration // exit if no trade events for this long (e.g. 90s)
+	NoTradeMaxMult             float64       // only exit dead tokens below this multiplier (e.g. 1.05)
+	NoTradeTimeoutFast         time.Duration // fast exit for deeply underwater tokens (e.g. 30s)
+	NoTradeFastMaxMult         float64       // fast timeout only below this multiplier (e.g. 0.90)
 	PreGradExitProgress        float64       // curve progress above which to tighten trailing stop (0 = disabled)
 }
 
@@ -250,9 +252,17 @@ func (m *Monitor) evaluateExit(ctx context.Context, pos *state.Position) {
 		}
 	}
 
-	// No-trade-activity exit: dead tokens with no price feed activity.
-	if m.exitCfg.NoTradeTimeout > 0 && !pos.LastTradeTime.IsZero() {
-		if m.clock.Since(pos.LastTradeTime) > m.exitCfg.NoTradeTimeout && multiplier < m.exitCfg.NoTradeMaxMult {
+	// Graduated no-trade-activity exit:
+	// - Fast timeout (30s) for deeply underwater positions (mult < 0.90)
+	// - Normal timeout (90s) for stagnant positions (mult < 1.05)
+	// - No timeout for profitable positions — let trailing stop handle it
+	if !pos.LastTradeTime.IsZero() {
+		silent := m.clock.Since(pos.LastTradeTime)
+		if m.exitCfg.NoTradeTimeoutFast > 0 && silent > m.exitCfg.NoTradeTimeoutFast && multiplier < m.exitCfg.NoTradeFastMaxMult {
+			m.executeSell(ctx, pos, 100-pos.SoldPct, "no-trade-activity")
+			return
+		}
+		if m.exitCfg.NoTradeTimeout > 0 && silent > m.exitCfg.NoTradeTimeout && multiplier < m.exitCfg.NoTradeMaxMult {
 			m.executeSell(ctx, pos, 100-pos.SoldPct, "no-trade-activity")
 			return
 		}

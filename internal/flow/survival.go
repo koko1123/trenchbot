@@ -12,6 +12,7 @@ import (
 type SurvivalModel struct {
 	Betas    []float64 `json:"betas"`
 	Features []string  `json:"features"`
+	Means    []float64 `json:"means"` // feature means from training data for centering
 }
 
 // LoadSurvivalModel reads a model from a JSON file.
@@ -61,13 +62,18 @@ func DefaultSurvivalModel() *SurvivalModel {
 }
 
 // SurvivalScore computes the linear predictor from observation and filter results.
-// Higher = better survival probability. Runtime: just a dot product.
+// Higher = better survival probability. If means are provided (from training data),
+// features are centered: score = sum(beta_i * (x_i - mean_i)).
 func (m *SurvivalModel) SurvivalScore(obs ObservationResult, filterScore int) float64 {
 	featureValues := m.extractFeatures(obs, filterScore)
 	score := 0.0
 	for i, beta := range m.Betas {
 		if i < len(featureValues) {
-			score += beta * featureValues[i]
+			x := featureValues[i]
+			if i < len(m.Means) {
+				x -= m.Means[i]
+			}
+			score += beta * x
 		}
 	}
 	return score
@@ -95,7 +101,7 @@ func (m *SurvivalModel) extractFeatures(obs ObservationResult, filterScore int) 
 		case "curve_progress":
 			values[i] = obs.CurveProgress
 		case "filter_score":
-			values[i] = float64(filterScore)
+			values[i] = float64(filterScore) / 100.0 // scale to 0-1 to match training
 		}
 	}
 	return values
